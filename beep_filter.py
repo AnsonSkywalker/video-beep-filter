@@ -439,7 +439,7 @@ def build_beep_filter(
     beep_refs: list[str] = []
     for i, (start, end) in enumerate(intervals):
         seg_duration = end - start
-        beep_len = min(seg_duration, beep_duration)
+        beep_len = seg_duration
         delay_ms = int(start * 1000)
         tag = f"b{i}"
 
@@ -662,9 +662,8 @@ def main():
 
     # ── 手动模式（跳过 Whisper）──
     if args.manual:
-        # 手动模式输出文件名加 _手动修改 后缀
+        # 手动模式在原有文件名后追加 _手动修改
         stem = re.sub(r'[<>:"/\\|?*]', '_', input_path.stem)
-        stem = re.sub(r'_?(手动修改|消音版)$', '', stem)
         output_path = input_path.with_name(f"{stem}_手动修改{input_path.suffix}")
         print(f"  \U0001f4c1 输出:   {output_path}")
         intervals = input_manual_timestamps()
