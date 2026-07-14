@@ -129,52 +129,90 @@ def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, f
     return [(round(s, 3), round(e, 3)) for s, e in merged]
 
 
+def parse_timestamp_str(s: str) -> float | None:
+    """将 HH:MM:SS.mmm 或 HH:MM:SS 格式的时间字符串转换为秒。"""
+    s = s.strip()
+    # 支持 H:MM:SS、HH:MM:SS、H:MM:SS.mmm 等变体
+    m = re.match(r'^(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$', s)
+    if not m:
+        return None
+    h, mi, sec = int(m.group(1)), int(m.group(2)), float(m.group(3))
+    if mi >= 60 or sec >= 60:
+        return None
+    return h * 3600 + mi * 60 + sec
+
+
 def input_manual_timestamps() -> List[Tuple[float, float]]:
     """
-    手动模式：跳过 Whisper 识别，接受用户逐行输入时间戳。
+    手动消音工作台模式。
 
-    每行格式: 起始秒 结束秒
-    输入空行 / EOF 结束。
+    跳过 Whisper 识别，接受用户以 HH:MM:SS 格式逐行输入起止时间戳，
+    输入 q / quit 结束，空行不结束（方便粘贴多行后手动结束）。
     """
-    print(f"\n  📝 手动消音模式")
-    print(f"  {'─' * 60}")
-    print(f"  请输入需要消音的时间区间（秒），每行一个区间：")
-    print(f"  格式: 起始秒 结束秒")
-    print(f"  输入空行或 Ctrl+Z 结束")
-    print(f"  {'─' * 60}")
+    print()
+    print("=" * 60)
+    print("  🛠️  手动消音工作台")
+    print("  根据平台审核标注的时间点，手动添加消音区间")
+    print("=" * 60)
+    print()
+    print("  格式:  起始时间  结束时间")
+    print("  示例:  00:09:31 00:09:34")
+    print("  输入 q 或 quit 结束，输入 list 查看已添加的区间")
+    print()
 
     intervals: List[Tuple[float, float]] = []
+
     while True:
         try:
-            line = input("  > ").strip()
+            raw = input("  > ").strip()
         except EOFError:
             break
-        if not line:
-            break
-        parts = line.split()
-        if len(parts) < 2:
-            print(f"  ⚠ 格式错误，应为「起始秒 结束秒」，跳过: {line}")
-            continue
-        try:
-            start, end = float(parts[0]), float(parts[1])
-        except ValueError:
-            print(f"  ⚠ 无法解析数字，跳过: {line}")
-            continue
-        if start < 0 or end <= start:
-            print(f"  ⚠ 无效区间（需 start>=0, end>start），跳过: {line}")
-            continue
-        intervals.append((start, end))
-        print(f"  ✓ 已添加: {format_time(start)} → {format_time(end)}  (时长 {end-start:.2f}s)")
 
+        if not raw:
+            continue  # 空行不退出，方便粘贴后手动输入 q
+
+        if raw.lower() in ("q", "quit", "exit"):
+            break
+
+        if raw.lower() in ("list", "ls"):
+            if not intervals:
+                print("    (暂无区间)")
+            else:
+                for i, (s, e) in enumerate(intervals, 1):
+                    print(f"    [{i}] {format_time(s)} → {format_time(e)}  ({e-s:.2f}s)")
+            continue
+
+        parts = raw.split()
+        if len(parts) < 2:
+            print(f"    ⚠ 格式错误，示例: 00:09:31 00:09:34")
+            continue
+
+        t1 = parse_timestamp_str(parts[0])
+        t2 = parse_timestamp_str(parts[1])
+
+        if t1 is None:
+            print(f"    ⚠ 无法解析起始时间「{parts[0]}」，请使用 HH:MM:SS 格式")
+            continue
+        if t2 is None:
+            print(f"    ⚠ 无法解析结束时间「{parts[1]}」，请使用 HH:MM:SS 格式")
+            continue
+        if t1 >= t2:
+            print(f"    ⚠ 起始时间 {format_time(t1)} 不早于结束时间 {format_time(t2)}，跳过")
+            continue
+
+        intervals.append((t1, t2))
+        print(f"    ✓ {format_time(t1)} → {format_time(t2)}  (时长 {t2-t1:.2f}s)")
+
+    print(f"\n  {'─' * 60}")
     if not intervals:
         print("  ⚠ 未输入任何有效区间。")
         return []
 
     merged = merge_intervals(intervals)
-    print(f"  {'─' * 60}")
-    print(f"  📊 合并后共 {len(merged)} 个区间:")
+    print(f"  📊 共 {len(intervals)} 个区间，合并后 {len(merged)} 个:")
     for i, (s, e) in enumerate(merged, 1):
         print(f"     [{i}] {format_time(s)} → {format_time(e)}  (时长 {e-s:.2f}s)")
+    print(f"  {'─' * 60}")
     return merged
 
 
@@ -619,10 +657,16 @@ def main():
     else:
         stem = re.sub(r'[<>:"/\\|?*]', '_', input_path.stem)
         output_path = input_path.with_name(f"{stem}_消音版{input_path.suffix}")
-    print(f"  📁 输出:   {output_path}")
+    if not args.manual:
+        print(f"  📁 输出:   {output_path}")
 
     # ── 手动模式（跳过 Whisper）──
     if args.manual:
+        # 手动模式输出文件名加 _手动修改 后缀
+        stem = re.sub(r'[<>:"/\\|?*]', '_', input_path.stem)
+        stem = re.sub(r'_?(手动修改|消音版)$', '', stem)
+        output_path = input_path.with_name(f"{stem}_手动修改{input_path.suffix}")
+        print(f"  \U0001f4c1 输出:   {output_path}")
         intervals = input_manual_timestamps()
         if not intervals:
             print("\n  ❌ 未输入任何有效区间，退出。")
