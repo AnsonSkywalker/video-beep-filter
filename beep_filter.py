@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import List, Tuple
 
@@ -254,6 +255,8 @@ def extract_audio(ffmpeg_path: str, video_path: str, output_wav: str):
 
 def transcribe_audio(model_size: str, audio_path: str) -> list:
     """用 OpenAI Whisper 进行语音识别，返回带逐字时间戳的 segments。"""
+    # 静默 Triton 警告：我们只需要 CUDA Runtime（JRE）即可正常推理
+    warnings.filterwarnings("ignore", message="Failed to launch Triton kernels")
     import whisper
 
     print(f"  🧠 加载 Whisper 模型（{model_size}）...")
