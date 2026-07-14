@@ -210,9 +210,10 @@ def find_target_segments(
     从识别结果中找出包含目标数字的片段及时间区间。
 
     策略：
-      - 在 segment 文本中匹配关键词
-      - 若能获取逐字时间戳（words），用其精确定位关键词的起止
-      - 否则使用整个 segment 的时间 + padding
+      - 对每个 segment，收集所有匹配的关键词（不再只找第一个）
+      - 关键词按长度降序排列，短词被子串去重（避免"六四"重复"零点六四"）
+      - 优先用逐字时间戳精确定位关键词的起止
+      - 若 word-level 定位失败，用整个 segment 时间 + padding 兜底
 
     返回: (合并后的时间区间列表, 匹配到的上下文文本列表)
     """
@@ -222,52 +223,49 @@ def find_target_segments(
     print(f"\n  🔎 搜索目标数字: {TARGET_KEYWORDS}")
     print(f"  {'─' * 60}")
 
+    # 按长度降序排列关键词（长词优先匹配，避免短词重复覆盖）
+    sorted_kws = sorted(TARGET_KEYWORDS, key=lambda x: -len(re.sub(r'\s+', '', x)))
+
     for seg in segments:
         text = seg.get("text", "").strip()
         if not text:
             continue
 
-        # 检查是否包含关键词（去空格后匹配）
         text_clean = re.sub(r'\s+', '', text)
-        matched_kw: str | None = None
-        for kw in TARGET_KEYWORDS:
+
+        # ── 收集当前 segment 中所有命中的关键词（去重） ──
+        matched_kws = []
+        already_covered = set()
+        for kw in sorted_kws:
             kw_clean = re.sub(r'\s+', '', kw)
             if kw_clean in text_clean:
-                matched_kw = kw
-                break
+                # 跳过已被更长关键词覆盖的短词（如"六四"已被"零点六四"覆盖）
+                is_covered = any(kw_clean in covered for covered in already_covered)
+                if not is_covered:
+                    matched_kws.append(kw)
+                    already_covered.add(kw_clean)
 
-        if not matched_kw:
+        if not matched_kws:
             continue
 
-        # 尝试用逐字时间戳精确定位
-        kw_clean = re.sub(r'\s+', '', matched_kw)
-        found_exact = False
-
         words = seg.get("words")
-        if words:
-            # 对于多字关键词，在 words 列表中滑动窗口匹配
-            kw_chars = list(kw_clean)
-            for i in range(len(words) - len(kw_chars) + 1):
-                window_text = ''.join(
-                    re.sub(r'\s+', '', w.get("word", "")) for w in words[i:i + len(kw_chars)]
-                )
-                if window_text == kw_clean:
-                    start = max(0, words[i].get("start", 0) - padding)
-                    end = words[i + len(kw_chars) - 1].get("end", 0) + padding
-                    hits.append((start, end))
-                    contexts.append(text[:80])
-                    print(f"  ⚡ 「{matched_kw}」→ {format_time(start)} → {format_time(end)}"
-                          f"  (原文: 「{text[:50]}」)")
-                    found_exact = True
-                    break
 
-            # 如果精确匹配没找到，可能是一个 word 包含整个关键词
-            if not found_exact:
-                for w in words:
-                    w_clean = re.sub(r'\s+', '', w.get("word", ""))
-                    if kw_clean in w_clean:
-                        start = max(0, w.get("start", 0) - padding)
-                        end = w.get("end", 0) + padding
+        # ── 对每个命中的关键词分别定位 ──
+        for matched_kw in matched_kws:
+            kw_clean = re.sub(r'\s+', '', matched_kw)
+            found_exact = False
+
+            if words:
+                # 第一级：在 words 列表中滑动窗口精确匹配
+                kw_chars = list(kw_clean)
+                for i in range(len(words) - len(kw_chars) + 1):
+                    window_text = ''.join(
+                        re.sub(r'\s+', '', w.get("word", ""))
+                        for w in words[i:i + len(kw_chars)]
+                    )
+                    if window_text == kw_clean:
+                        start = max(0, words[i].get("start", 0) - padding)
+                        end = words[i + len(kw_chars) - 1].get("end", 0) + padding
                         hits.append((start, end))
                         contexts.append(text[:80])
                         print(f"  ⚡ 「{matched_kw}」→ {format_time(start)} → {format_time(end)}"
@@ -275,14 +273,28 @@ def find_target_segments(
                         found_exact = True
                         break
 
-        if not found_exact:
-            # 降级：使用整个 segment 的时间
-            start = max(0, seg.get("start", 0) - padding)
-            end = seg.get("end", 0) + padding
-            hits.append((start, end))
-            contexts.append(text[:80])
-            print(f"  ⚡ 「{matched_kw}」→ {format_time(start)} → {format_time(end)}"
-                  f"  (原文: 「{text[:50]}」)")
+                # 第二级：单个 word 包含整个关键词
+                if not found_exact:
+                    for w in words:
+                        w_clean = re.sub(r'\s+', '', w.get("word", ""))
+                        if kw_clean in w_clean:
+                            start = max(0, w.get("start", 0) - padding)
+                            end = w.get("end", 0) + padding
+                            hits.append((start, end))
+                            contexts.append(text[:80])
+                            print(f"  ⚡ 「{matched_kw}」(单字) → {format_time(start)} → {format_time(end)}"
+                                  f"  (原文: 「{text[:50]}」)")
+                            found_exact = True
+                            break
+
+            # 第三级：兜底 —— 使用整个 segment 的时间（方案 D）
+            if not found_exact:
+                start = max(0, seg.get("start", 0) - padding)
+                end = seg.get("end", 0) + padding
+                hits.append((start, end))
+                contexts.append(text[:80])
+                print(f"  ⚡ 「{matched_kw}」(segment 级) → {format_time(start)} → {format_time(end)}"
+                      f"  (原文: 「{text[:50]}」)")
 
     if not hits:
         print(f"  {'─' * 60}")
