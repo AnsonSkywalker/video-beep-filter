@@ -129,6 +129,55 @@ def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, f
     return [(round(s, 3), round(e, 3)) for s, e in merged]
 
 
+def input_manual_timestamps() -> List[Tuple[float, float]]:
+    """
+    手动模式：跳过 Whisper 识别，接受用户逐行输入时间戳。
+
+    每行格式: 起始秒 结束秒
+    输入空行 / EOF 结束。
+    """
+    print(f"\n  📝 手动消音模式")
+    print(f"  {'─' * 60}")
+    print(f"  请输入需要消音的时间区间（秒），每行一个区间：")
+    print(f"  格式: 起始秒 结束秒")
+    print(f"  输入空行或 Ctrl+Z 结束")
+    print(f"  {'─' * 60}")
+
+    intervals: List[Tuple[float, float]] = []
+    while True:
+        try:
+            line = input("  > ").strip()
+        except EOFError:
+            break
+        if not line:
+            break
+        parts = line.split()
+        if len(parts) < 2:
+            print(f"  ⚠ 格式错误，应为「起始秒 结束秒」，跳过: {line}")
+            continue
+        try:
+            start, end = float(parts[0]), float(parts[1])
+        except ValueError:
+            print(f"  ⚠ 无法解析数字，跳过: {line}")
+            continue
+        if start < 0 or end <= start:
+            print(f"  ⚠ 无效区间（需 start>=0, end>start），跳过: {line}")
+            continue
+        intervals.append((start, end))
+        print(f"  ✓ 已添加: {format_time(start)} → {format_time(end)}  (时长 {end-start:.2f}s)")
+
+    if not intervals:
+        print("  ⚠ 未输入任何有效区间。")
+        return []
+
+    merged = merge_intervals(intervals)
+    print(f"  {'─' * 60}")
+    print(f"  📊 合并后共 {len(merged)} 个区间:")
+    for i, (s, e) in enumerate(merged, 1):
+        print(f"     [{i}] {format_time(s)} → {format_time(e)}  (时长 {e-s:.2f}s)")
+    return merged
+
+
 def format_time(seconds: float) -> str:
     """将秒数格式化为 HH:MM:SS.mmm"""
     h = int(seconds // 3600)
@@ -510,6 +559,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "  python beep_filter.py D:\\视频\\录制.flv -o 消音版.flv --model-size small\n"
             "  python beep_filter.py D:\\视频\\录制.flv --dry-run    # 仅查看识别结果\n"
             "  python beep_filter.py D:\\视频\\录制.flv --padding 0.3\n"
+            "  python beep_filter.py D:\\视频\\录制.flv --manual    # 手动输入时间戳\n"
+            "  python beep_filter.py D:\\视频\\录制.flv --review-model small   # 双重检测\n"
         ),
     )
     parser.add_argument("input", help="输入视频文件路径（支持 FLV/MP4/AVI/MKV 等）")
@@ -518,6 +569,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ffprobe-path", default=FFPROBE_DEFAULT, help="ffprobe 路径")
     parser.add_argument("--model-size", default="base",
                         help="Whisper 模型大小: tiny / base / small / medium / large（默认 base，tiny 最快）")
+    parser.add_argument("--manual", action="store_true",
+                        help="手动模式：跳过 Whisper 语音识别，手动输入时间戳")
+    parser.add_argument("--review-model", default=None,
+                        help="复审模型: small / medium / large。用更大模型做二次检测，合并区间（需 CUDA 版 PyTorch 加速）")
     parser.add_argument("--beep-freq", type=int, default=880,
                         help="哔声频率 Hz（默认 880，类似电视消音效果）")
     parser.add_argument("--beep-duration", type=float, default=0.8,
@@ -566,6 +621,27 @@ def main():
         output_path = input_path.with_name(f"{stem}_消音版{input_path.suffix}")
     print(f"  📁 输出:   {output_path}")
 
+    # ── 手动模式（跳过 Whisper）──
+    if args.manual:
+        intervals = input_manual_timestamps()
+        if not intervals:
+            print("\n  ❌ 未输入任何有效区间，退出。")
+            sys.exit(1)
+        process_video(
+            ffmpeg, ffprobe,
+            str(input_path), str(output_path),
+            intervals, args.beep_freq, args.beep_duration,
+            dry_run=args.dry_run,
+        )
+        print("\n" + "=" * 60)
+        if args.dry_run:
+            print("  🔍 Dry-Run 完成，以上为模拟处理结果。")
+            print("  去掉 --dry-run 即可执行实际处理。")
+        else:
+            print(f"  ✅ 全部完成！{output_path}")
+        print("=" * 60 + "\n")
+        return
+
     # ── 检查依赖 ──
     print(f"\n  📦 检查 Python 依赖...")
     ready = ensure_deps()
@@ -594,6 +670,32 @@ def main():
 
         # ── Step 3: 定位目标 ──
         intervals, contexts = find_target_segments(segments, args.padding)
+
+        # ── Step 3b: 复审模式（用更大模型二次检测）──
+        if args.review_model:
+            if args.review_model == args.model_size:
+                print("\n  ⚠ 复审模型与首轮相同 (" + args.model_size + ")，跳过复审。")
+            else:
+                print("\n" + "=" * 60)
+                print("  🔄 复审模式：使用 " + args.review_model + " 模型二次检测...")
+                print("=" * 60)
+                segments2 = transcribe_audio(args.review_model, wav_path)
+                print("\n  📜 复审识别文本:")
+                print("  " + "─" * 60)
+                for seg in segments2:
+                    print(f"  [{format_time(seg.get('start', 0))} → {format_time(seg.get('end', 0))}] {seg.get('text', '').strip()}")
+                print("  " + "─" * 60)
+                intervals2, _ = find_target_segments(segments2, args.padding)
+
+                # 合并两轮区间
+                all_iv = intervals + intervals2
+                merged = merge_intervals(all_iv)
+                if len(merged) > len(intervals):
+                    added = len(merged) - len(intervals)
+                    print(f"\n  🟢 复审发现 {added} 个新增区间，已合并（共 {len(merged)} 个）")
+                else:
+                    print(f"\n  ✅ 复审未发现新区间，原有 {len(intervals)} 个区间不变")
+                intervals = merged
 
         # ── Step 4: 处理视频 ──
         process_video(
