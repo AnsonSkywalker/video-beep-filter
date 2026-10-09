@@ -1,5 +1,4 @@
-﻿#Requires -Version 5.1
-<#
+﻿<#
 .SYNOPSIS
     一键拆弹（弹幕版）：先对 FLV 音频消音，再把同名 ASS 直播弹幕硬编码进视频。
 
@@ -172,6 +171,11 @@
     .\一键拆弹_弹幕版.ps1 -Directory "D:\B站录播" -Lanes 16 -ScrollDuration 12 -KeepAss
     B站弹幕很密时加宽到 16 条车道、缩短在屏时间以减少文字压叠，并保留转换出的 ASS。
 #>
+
+# 注意：#Requires 必须放在帮助块之后。放在文件最前面会让 Get-Help 认不出
+# 上面的注释式帮助（只会吐出语法行），而放在这里依然会被强制执行。
+#Requires -Version 5.1
+
 [CmdletBinding()]
 param(
     [string]$Directory,
