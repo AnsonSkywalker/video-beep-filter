@@ -1,0 +1,1 @@
+get-ChildItem "C:\Users\82438\AppData\Roaming\reasonix\拆弹" -Filter "*.flv" | ForEach-Object { python beep_filter.py $_.FullName --model-size large}
