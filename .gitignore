@@ -36,6 +36,9 @@ env/
 # Reasonix internal
 .reasonix/
 
+# Agent 工作笔记（本地使用，不入库；README.md 仍然入库）
+AGENTS.md
+
 # OS
 Thumbs.db
 .DS_Store

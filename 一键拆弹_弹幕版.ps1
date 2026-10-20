@@ -30,6 +30,18 @@
       * 若某 flv 没有同名弹幕文件，则跳过 Step 2，其成品就是 _消音版.flv。
       * 出于过审考虑，Step 2 绝不会退回去烧录「未消音」的原片：
         找不到消音版输出时只报错跳过。
+      * 弹幕正文也要过审：烧录前逐行审查要烧的那份 ASS，正文命中敏感数字的整行直接
+        抹除。覆盖面按「画面上会被机器审核看到」来定，比音频侧宽得多：以
+        beep_filter.py 的 TARGET_KEYWORDS（14 种，音频同源）为基础，再叠加
+        danmaku_censor.py 的视觉扩展 —— 0.64 / 6.4 / 6,4 / 6·4 / 6/4 等组合、
+        全角与带圈数字、以及 陆肆 / 陸肆 / 六4 / 6四 / 陆拾肆 / 捌拾玖 / 6月4日
+        这类汉字（含财务体、繁体、日期）写法，都在覆盖范围内。
+        抖音 ass 与 B站 xml 走同一套逻辑，-KeepAss 留下的也是审查后的版本。
+        审查脚本缺失或执行失败会中止烧录，宁可不出片也不漏审。
+      * 抖音 ASS 烧录前会先按视频画布做一次适配：DanmakuRender 的 PlayRes 偶尔与录播
+        画布比例不一致（例如 ASS 是 1920x1080、视频是 720x1280），libass 对 x 坐标和
+        字号的缩放比例不同，滚动弹幕会在还剩大半文字没滑出时提前消失。适配只改临时
+        副本，不动原 ASS；比例一致时完全不动。
       * 兼容「异常宽高比」的录播：B站连麦时录播机通常会另起一个新文件，所以单个文件内
         比例是恒定的，但该文件可能不是 9:16 竖屏（双人画面可能是横屏/方形）。这类文件
         照常处理：字号按画面面积开方缩放、车道按字号比例推导，版面自适应，不拉伸。
@@ -119,8 +131,14 @@
     减少堆叠（例如 12 秒）。
 
 .PARAMETER KeepAss
-    保留 B站 xml 转换出来的 ASS 文件（与成品同名、扩展名为 .ass），便于检查或手工微调。
-    默认不保留（只放在临时目录里）。
+    保留「最终烧录用的那份 ASS」（与成品同名、扩展名为 .ass），便于检查或手工微调。
+    默认不保留（只放在临时目录里）。保留的是**已经过正文审查**的版本——
+    抖音 ass 会留一份审查后的副本，B站 xml 留的是转换结果，两者都方便核对到底烧了什么。
+
+.PARAMETER SkipCensor
+    跳过弹幕正文审查（仅调试用）。默认会逐行审查要烧录的 ASS，正文命中敏感数字的
+    整行抹除；覆盖面见上文「弹幕正文也要过审」，抖音 ass 与 B站 xml 走同一套逻辑。
+    想核对最终生效的关键词清单：`python danmaku_censor.py --list-keywords`
 
 .PARAMETER SkipMute
     跳过消音，仅对已存在的 _消音版 文件烧录弹幕。
@@ -197,6 +215,7 @@ param(
     [double]$FontSize = 0,
     [double]$ScrollDuration = 0,
     [switch]$KeepAss,
+    [switch]$SkipCensor,
     [switch]$SkipMute,
     [switch]$SkipDanmaku,
     [switch]$KeepMuted,
@@ -254,6 +273,10 @@ $EncoderArgs = @{
 }
 # B站 xml 弹幕 → ASS 的转换脚本
 $BiliConverterName = 'bili_danmaku_to_ass.py'
+# 弹幕正文审查（命中敏感数字的整行抹除；关键词表见 danmaku_censor.py）
+$CensorScriptName = 'danmaku_censor.py'
+# 弹幕画布适配（ASS 的 PlayRes 与视频画布比例不一致时重排坐标与字号）
+$FitScriptName = 'ass_canvas_fit.py'
 
 # ---------- 小工具 ----------
 function Write-Step([string]$Text) {
@@ -693,8 +716,14 @@ $failed = 0
 # 不能只认第一份。
 $styleCache = @{}
 $biliConverter = Join-Path $scriptDir $BiliConverterName
+$censorScript = Join-Path $scriptDir $CensorScriptName
+$fitScript = Join-Path $scriptDir $FitScriptName
 # B站 xml 转换结果是否已提示过「缺少转换脚本」
 $convMissingWarned = $false
+# 审查脚本缺失是否已提示过
+$censorMissingWarned = $false
+# 画布适配脚本缺失是否已提示过
+$fitMissingWarned = $false
 
 foreach ($flv in $flvs) {
     $stem = [System.IO.Path]::GetFileNameWithoutExtension($flv.Name)
@@ -857,6 +886,36 @@ foreach ($flv in $flvs) {
                     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
                     [System.IO.File]::WriteAllText($workAss, $assText, $utf8NoBom)
                 }
+
+                # 抖音 ASS 的 PlayRes 不一定等于录播画布。比例不一致时，libass 对 x 坐标
+                # 和字号的缩放比例不同，滚动弹幕 \move 的终点（负的文字宽度）会缩得不够，
+                # 文字还剩大半就随事件结束消失。烧录前在临时副本上重排到视频画布，
+                # 原 ASS 不动；比例一致时脚本自己会跳过。
+                if ($canvas) {
+                    if (-not (Test-Path -LiteralPath $fitScript)) {
+                        Write-Err "找不到画布适配脚本 $(Split-Path -Leaf $fitScript)，无法保证滚动弹幕完整滑出画面"
+                        if (-not $fitMissingWarned) {
+                            Write-Warn "请确认 $FitScriptName 与本脚本放在同一目录：$scriptDir"
+                            $fitMissingWarned = $true
+                        }
+                        $prepOk = $false
+                    }
+                    else {
+                        $fitArgs = @(
+                            $fitScript, $workAss,
+                            '--width', "$($canvas.Width)",
+                            '--height', "$($canvas.Height)"
+                        )
+                        $fitCode = Invoke-External -Exe $PythonPath -Arguments $fitArgs -WorkingDirectory $scriptDir
+                        if ($fitCode -ne 0) {
+                            Write-Err "弹幕画布适配失败（退出码 $fitCode），已中止烧录"
+                            $prepOk = $false
+                        }
+                    }
+                }
+                else {
+                    Write-Warn '读不到视频画布，跳过弹幕画布适配；若 ASS 与视频比例不一致，滚动弹幕可能提前消失'
+                }
             }
             else {
                 if (-not (Test-Path -LiteralPath $biliConverter)) {
@@ -925,6 +984,34 @@ foreach ($flv in $flvs) {
                 }
             }
 
+            # ---- 弹幕正文审查：命中敏感数字关键词的整行弹幕直接抹除 ----
+            # 两条来源都走这里：抖音 ass 是拷进来的，B站 xml 是刚转换出来的，
+            # 统一在「要烧的那份 ASS」上做，实现只有一处，也不会漏掉任何一条路径。
+            # 关键词以 beep_filter.py 的 TARGET_KEYWORDS（音频同源）为基础，
+            # 由 danmaku_censor.py 再叠加画面侧的视觉变体（0.64/6.4 等组合、全角数字、
+            # 陆肆/陆拾肆/6月4 这类汉字写法）。
+            if ($prepOk) {
+                if ($SkipCensor) {
+                    Write-Skip '指定 -SkipCensor，跳过弹幕正文审查（仅调试用）'
+                }
+                elseif (-not (Test-Path -LiteralPath $censorScript)) {
+                    Write-Err "找不到审查脚本 $(Split-Path -Leaf $censorScript)，为避免漏审已中止烧录"
+                    if (-not $censorMissingWarned) {
+                        Write-Warn "请确认 $CensorScriptName 与本脚本放在同一目录：$scriptDir"
+                        $censorMissingWarned = $true
+                    }
+                    $prepOk = $false
+                }
+                else {
+                    $censorArgs = @($censorScript, $workAss, '--preview', '3')
+                    $censCode = Invoke-External -Exe $PythonPath -Arguments $censorArgs -WorkingDirectory $scriptDir
+                    if ($censCode -ne 0) {
+                        Write-Err "弹幕正文审查失败（退出码 $censCode），为避免漏审已中止烧录"
+                        $prepOk = $false
+                    }
+                }
+            }
+
             if ($prepOk) {
                 Write-Host "   Step 2 烧录弹幕（$VideoEncoder → $Container）..." -ForegroundColor Gray
                 # 归一化滤镜必须在 ass 之前：先锁定帧尺寸，再让 libass 按固定画布绘制
@@ -961,15 +1048,18 @@ foreach ($flv in $flvs) {
             Write-Produced $danmakuPath
             $finalPath = $danmakuPath
 
-            # -KeepAss：把 xml 转换出来的 ASS 也留一份（与成品同名，便于检查/手工微调）
-            if ($KeepAss -and $hasXml) {
+            # -KeepAss：把「最终烧录用的那份 ASS」留一份（与成品同名，便于检查/手工微调）。
+            # 两条来源都留：B站 xml 是转换出来的，抖音 ass 是审查过的副本 ——
+            # 留这个的意义就在于能核对「到底往画面里烧了什么」。
+            if ($KeepAss) {
                 $assOut = Join-Path $Directory "${prefix}${stem}${MUTED_TAG}${DANMAKU_TAG}.ass"
                 if ($DryRun) {
-                    Write-Host "   [DryRun] 将保留转换出的 ASS $(Split-Path -Leaf $assOut)" -ForegroundColor DarkCyan
+                    Write-Host "   [DryRun] 将保留烧录用的 ASS $(Split-Path -Leaf $assOut)" -ForegroundColor DarkCyan
                 }
                 else {
                     Copy-Item -LiteralPath $workAss -Destination $assOut -Force
-                    Write-Host "   已保留转换出的 ASS $(Split-Path -Leaf $assOut)" -ForegroundColor DarkGray
+                    $assTag = if ($SkipCensor) { '' } else { '（已过正文审查）' }
+                    Write-Host "   已保留烧录用的 ASS$assTag $(Split-Path -Leaf $assOut)" -ForegroundColor DarkGray
                 }
                 $extras += $assOut
             }
