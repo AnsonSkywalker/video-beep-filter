@@ -23,6 +23,7 @@
 - [工作流程详解](#-工作流程详解)
 - [性能说明](#-性能说明)
 - [弹幕硬编码流水线（一键拆弹_弹幕版.ps1）](#-弹幕硬编码流水线一键拆弹_弹幕版ps1)
+- [运行日志](#-运行日志)
 - [常见问题](#-常见问题)
 - [项目结构](#-项目结构)
 
@@ -341,6 +342,8 @@ python beep_filter.py "D:\视频.flv" --keep-wav
 | `--keep-wav` | `false` | 保留中间提取的 WAV 音频文件 |
 | `--ffmpeg-path` | 自动查找 | 指定 ffmpeg 可执行文件路径 |
 | `--ffprobe-path` | 自动查找 | 指定 ffprobe 可执行文件路径 |
+| `--log-dir` | 脚本目录/logs | 运行日志目录；每次运行生成一个 `.log` |
+| `--no-log` | `false` | 不写运行日志（ps1 调用时自动加上，避免重复） |
 
 ---
 
@@ -575,6 +578,7 @@ python danmaku_censor.py --list-keywords
 | `-KeepAss` | 关 | 保留「最终烧录用的那份 ASS」（与成品同名），便于核对到底烧了什么；内容已过正文审查 |
 | `-SkipCensor` | 关 | 跳过弹幕正文审查（仅调试用） |
 | `-Force` / `-DryRun` | 关 | 强制重做 / 只预览命令，不改动任何文件 |
+| `-LogDir` | 脚本目录/logs | 运行日志目录；每次正式运行生成一个 `.log`，`-DryRun` 不写 |
 
 ### 异常兜底提示
 
@@ -642,6 +646,33 @@ x 比例缩小、文字本身却跟着字号比例放大，于是事件结束时
 
 脚本缺失或适配失败会中止烧录；`-KeepAss` 留下的是适配并审查后的版本。已经出过的成品需要
 加 `-Force` 重跑才会应用这个修复。
+
+---
+
+## 🧾 运行日志
+
+每次正式运行 `一键拆弹_弹幕版.ps1` 或 `beep_filter.py`，都会在脚本所在目录的 `logs\` 下生成一份 `.log`：
+
+| 入口 | 文件名 | 记录内容 |
+|------|--------|----------|
+| `一键拆弹_弹幕版.ps1` | `一键拆弹_YYYYMMDD_HHMMSS.log` | 启动参数、PowerShell 版本、脚本路径、每个文件的处理步骤、外部命令与工作目录、退出码、ffmpeg 报告、汇总与异常 |
+| `beep_filter.py` | `beep_filter_<manual\|auto>_<视频名>_YYYYMMDD_HHMMSS.log` | 命令行、输入/输出、模式、Python 版本、Whisper 识别文本、手动输入的时间戳、滤镜命令、退出码 |
+
+说明：
+
+- 日志统一为 UTF-8（无 BOM），每行带 `[HH:MM:SS]` 时间戳；同一秒内重跑会自动加 `_2`、`_3`，不会覆盖已有日志。
+- 默认目录是**脚本所在目录**下的 `logs\`，不是待处理视频所在目录。需要改位置时：
+  ```powershell
+  .\一键拆弹_弹幕版.ps1 -LogDir "D:\日志"
+  python beep_filter.py "视频.flv" --log-dir "D:\日志"
+  ```
+- `一键拆弹_弹幕版.ps1` 调用 `beep_filter.py` 时会自动加 `--no-log`，一次运行只产生主日志；直接运行 `beep_filter.py` 默认写日志，可用 `--no-log` 关闭。
+- `-DryRun` **不写日志**（保持“不产生任何文件”的承诺）；`beep_filter.py --dry-run` 仍会写日志，想关闭就加 `--no-log`。
+- ffmpeg 烧录命令会在临时工作目录里额外生成 `ffmpeg-*.log` 报告，命令结束后自动追加到主日志的 `[ffmpeg 报告]` 段：报告按 info 级记录（`FFREPORT=level=32`），包含 ffmpeg 版本、Input/Output、Stream mapping、libass、错误等信息；不会包含 `nal_unit_type` 这类 debug 行，中间逐帧 `frame=` 进度只保留最后一条，避免刷屏。控制台的实时进度不受影响，日志体积比 debug 模式小很多。
+- 报告文件本身随临时工作目录在运行结束时删除，`logs\` 下只保留主日志。
+- 日志会记录本机真实路径和视频文件名，**`logs/` 已在 `.gitignore` 中整目录忽略**，不要用 `git add -f` 把日志带进仓库。
+- 日志不会自动清理或轮转；长期使用可以手动删除旧文件。
+- ffmpeg 的实时进度仍写在 stderr、只显示在控制台；命令结束后日志会追加上述报告（含最终 `frame=` 和错误），排查时两者结合看。
 
 ---
 
@@ -750,6 +781,7 @@ video-beep-filter/
 ├── 一键拆弹_弹幕版.ps1       # 批量消音 + 弹幕硬编码 + 正文审查（推荐入口）
 ├── README.md                 # 本文件
 ├── LICENSE                   # 许可证（MIT）
+├── logs/                     # 运行时生成：每次运行的 .log（已被 .gitignore 忽略）
 └── .gitignore                # Git 忽略规则（录播素材、成品、中间文件都不入库）
 ```
 

@@ -156,6 +156,12 @@
 .PARAMETER DryRun
     只打印将执行的命令，不实际执行（不产生/删除/改名任何文件）。
 
+.PARAMETER LogDir
+    运行日志目录，默认脚本所在目录下的 logs。
+    每次正式运行生成一个 .log，记录启动参数、每个文件的处理步骤、外部命令、
+    工作目录、退出码、汇总与异常。日志含本机真实路径，目录已被 .gitignore 忽略。
+    -DryRun 不写日志（不产生任何文件）。
+
 .EXAMPLE
     .\一键拆弹_弹幕版.ps1
     处理脚本所在目录的全部 flv：消音 + 烧录同名弹幕，只留 MP4 成品。
@@ -220,7 +226,8 @@ param(
     [switch]$SkipDanmaku,
     [switch]$KeepMuted,
     [switch]$Force,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string]$LogDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -228,6 +235,115 @@ $ErrorActionPreference = 'Stop'
 # 控制台按 UTF-8 输出，保证中文文件名/日志不乱码
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $env:PYTHONIOENCODING = 'utf-8'
+
+# ---------- 运行日志 ----------
+# 日志默认落在脚本目录下的 logs\，每次正式运行一个 .log。
+# 这里把 Write-Host 包成同名函数：先调用内置 cmdlet，再把同一段文本写进日志。
+# 这样脚本里原有的几十处 Write-Host 都不用改，新增输出也会自动入日志。
+$script:LogWriter = $null
+$script:LogPath = $null
+$script:LogStarted = $null
+$script:LogEncoding = New-Object System.Text.UTF8Encoding($false)
+
+function Write-Log {
+    param([string]$Text)
+    if (-not $script:LogWriter) { return }
+    $stamp = Get-Date -Format 'HH:mm:ss'
+    try {
+        # 按行拆开，保证多行文本每行都有时间戳
+        foreach ($line in ($Text -split "\r?\n")) {
+            $script:LogWriter.WriteLine("[$stamp] $line")
+        }
+    }
+    catch {
+        # 日志写不进去不能影响主流程
+        try { $script:LogWriter.Dispose() } catch { }
+        $script:LogWriter = $null
+        Microsoft.PowerShell.Utility\Write-Host "   [警告] 日志写入失败，后续不再记录: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+function Write-Host {
+    param(
+        [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+        [object[]]$Object,
+        [switch]$NoNewline,
+        [ConsoleColor]$ForegroundColor,
+        [ConsoleColor]$BackgroundColor,
+        [object]$Separator
+    )
+    Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
+    if ($script:LogWriter) {
+        $sep = if ($PSBoundParameters.ContainsKey('Separator')) { "$Separator" } else { ' ' }
+        $text = ($Object | ForEach-Object { "$_" }) -join $sep
+        Write-Log $text
+    }
+}
+
+function Initialize-Log {
+    param([string]$LogDirectory, [string]$Prefix)
+    if ($DryRun) {
+        Write-Host '  日志     : DryRun 不写日志' -ForegroundColor DarkGray
+        return
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $LogDirectory)) {
+            New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+        }
+        $LogDirectory = (Resolve-Path -LiteralPath $LogDirectory).Path
+        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $path = Join-Path $LogDirectory "${Prefix}_${stamp}.log"
+        # 同一秒内重跑时避免覆盖/追加到同一份日志
+        $i = 2
+        while (Test-Path -LiteralPath $path) {
+            $path = Join-Path $LogDirectory "${Prefix}_${stamp}_${i}.log"
+            $i++
+        }
+        $writer = New-Object System.IO.StreamWriter($path, $true, $script:LogEncoding)
+        $writer.AutoFlush = $true
+        $script:LogWriter = $writer
+        $script:LogPath = $path
+        $script:LogStarted = Get-Date
+        Write-Log '===== 一键拆弹（弹幕版）运行日志 ====='
+        Write-Log "开始时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Log "脚本: $PSCommandPath"
+        Write-Log "PowerShell: $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
+        Write-Host "  日志     : $path" -ForegroundColor DarkGray
+    }
+    catch {
+        $script:LogWriter = $null
+        $script:LogPath = $null
+        Microsoft.PowerShell.Utility\Write-Host "   [警告] 无法创建运行日志（$($_.Exception.Message)），本次不写日志" -ForegroundColor Yellow
+    }
+}
+
+function Close-Log {
+    param([int]$ExitCode = 0)
+    if (-not $script:LogWriter) { return }
+    try {
+        Write-Log "结束时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        if ($script:LogStarted) {
+            $sec = [math]::Round(((Get-Date) - $script:LogStarted).TotalSeconds, 1)
+            Write-Log "总耗时: ${sec}s"
+        }
+        Write-Log "退出码: $ExitCode"
+        $script:LogWriter.Flush()
+        $script:LogWriter.Dispose()
+    }
+    catch { }
+    finally {
+        $script:LogWriter = $null
+        $script:LogPath = $null
+    }
+}
+
+# 未捕获的终止错误也写进日志（记录后保持原有终止行为）
+trap {
+    Write-Log "脚本异常终止: $($_.Exception.Message)"
+    if ($_.ScriptStackTrace) { Write-Log $_.ScriptStackTrace }
+    Close-Log -ExitCode 1
+    throw
+}
 
 # DryRun 只预览、不跑 Whisper，但我们习惯先 DryRun 再照着跑一遍；
 # 未显式给 -ModelSize 时，DryRun 默认用最快的小模型，省得每次手打 tiny。
@@ -307,26 +423,116 @@ function Format-Argv {
     return ($Exe + ' ' + ($quoted -join ' '))
 }
 
+# 读取 ffmpeg -report 生成的新报告，追加到主日志。
+# 报告是命令结束后才读的，所以不影响控制台 stderr 的实时显示。
+function Write-FfmpegReport {
+    param(
+        [string]$WorkingDirectory,
+        [string[]]$BeforeFiles
+    )
+    try {
+        $newReports = @(
+            Get-ChildItem -LiteralPath $WorkingDirectory -Filter 'ffmpeg-*.log' -ErrorAction SilentlyContinue |
+                Where-Object { $BeforeFiles -notcontains $_.Name } |
+                Sort-Object LastWriteTime -Descending
+        )
+        if ($newReports.Count -eq 0) {
+            Write-Log '  [ffmpeg 报告] 未找到新生成的 ffmpeg-*.log，详细输出仅见控制台'
+            return
+        }
+        $report = $newReports[0]
+        $text = [System.IO.File]::ReadAllText($report.FullName, [System.Text.Encoding]::UTF8)
+        $lines = $text -split "\r?\n|\r"
+        $kept = New-Object System.Collections.Generic.List[string]
+        $lastFrame = ''
+        $lastBlank = $false
+        foreach ($line in $lines) {
+            $trimmed = $line.TrimEnd()
+            if ($trimmed -match '^\s*frame=\s*\d+') {
+                # 逐帧进度只在最后保留一条，避免日志被 \r 刷屏
+                $lastFrame = $trimmed.Trim()
+                continue
+            }
+            if ($trimmed.Trim().Length -eq 0) {
+                if (-not $lastBlank -and $kept.Count -gt 0) { $kept.Add(''); $lastBlank = $true }
+                continue
+            }
+            $kept.Add($trimmed)
+            $lastBlank = $false
+        }
+        if ($lastFrame) { $kept.Add($lastFrame) }
+        Write-Log "  [ffmpeg 报告] $($report.Name)（原始 $($lines.Count) 行，保留 $($kept.Count) 行，中间进度已省略）"
+        foreach ($line in $kept) {
+            Write-Log "      $line"
+        }
+    }
+    catch {
+        Write-Log "  [ffmpeg 报告] 读取失败: $($_.Exception.Message)"
+    }
+}
+
 # 执行外部命令；返回退出码。DryRun 时只打印不执行。
+# -CaptureFfmpegReport 仅给 ffmpeg 烧录用：额外写一份 ffmpeg-*.log 报告，
+# 命令结束后再追加到主日志；控制台的 stderr 实时输出保持不变。
 function Invoke-External {
     param(
         [string]$Exe,
         [string[]]$Arguments,
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+        [switch]$CaptureFfmpegReport
     )
+    $oldFFReport = $env:FFREPORT
+    if ($CaptureFfmpegReport -and -not $DryRun) {
+        # -report 会把报告级别强制拉到 debug（Log level: 48），-loglevel 改不动它；
+        # 只有 FFREPORT=level=32 能把报告降到 info，保留 Input/Output/Stream mapping/
+        # libass/错误，同时去掉 nal_unit_type 等 debug 行。
+        $env:FFREPORT = 'level=32'
+        $Arguments = @('-report') + $Arguments
+    }
+    $cmdLine = Format-Argv -Exe $Exe -Arguments $Arguments
     if ($DryRun) {
-        Write-Host ('   [DryRun] ' + (Format-Argv -Exe $Exe -Arguments $Arguments)) -ForegroundColor DarkCyan
+        Write-Host ('   [DryRun] ' + $cmdLine) -ForegroundColor DarkCyan
         return 0
+    }
+    Write-Log "  [命令] $cmdLine"
+    Write-Log "  [工作目录] $WorkingDirectory"
+    # 记录运行前已存在的报告文件，稍后只读取本次新生成的那份
+    $beforeReports = @()
+    if ($CaptureFfmpegReport) {
+        $beforeReports = @(
+            Get-ChildItem -LiteralPath $WorkingDirectory -Filter 'ffmpeg-*.log' -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.Name }
+        )
     }
     Push-Location -LiteralPath $WorkingDirectory
     try {
         # 子进程 stdout 必须经 Out-Host 直接打到控制台。
         # 若写成 `& $Exe @Arguments`，子进程的 stdout 会被当作本函数的“返回值”，
         # 和退出码一起返回（$code 变成数组），退出码判断随即失效。
-        & $Exe @Arguments | Out-Host
-        return $LASTEXITCODE
+        # 这里在 Out-Host 之前逐行 tee 进日志；不要改成 2>&1：
+        # Windows PowerShell 5.1 下原生程序的 stderr 并进管道会生成 NativeCommandError，
+        # 配合 $ErrorActionPreference='Stop' 会直接中断脚本（见 AGENTS.md 6.6）。
+        & $Exe @Arguments | ForEach-Object {
+            Write-Log "    $_"
+            $_
+        } | Out-Host
+        $code = $LASTEXITCODE
+        Write-Log "  [退出码] $code"
+        if ($CaptureFfmpegReport) {
+            Write-FfmpegReport -WorkingDirectory $WorkingDirectory -BeforeFiles $beforeReports
+        }
+        return $code
     }
     finally {
+        if ($CaptureFfmpegReport -and -not $DryRun) {
+            # 只在本进程内临时设置，跑完恢复，避免影响用户自己的 ffmpeg 调用
+            if ($null -eq $oldFFReport) {
+                Remove-Item Env:FFREPORT -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:FFREPORT = $oldFFReport
+            }
+        }
         Pop-Location
     }
 }
@@ -599,6 +805,30 @@ if (-not $Directory) { $Directory = $scriptDir }
 if (-not (Test-Path -LiteralPath $Directory)) { throw "目录不存在: $Directory" }
 $Directory = (Resolve-Path -LiteralPath $Directory).Path
 
+# 日志默认落在脚本所在目录的 logs\ 下（-LogDir 可改到别处）
+if (-not $LogDir) { $LogDir = Join-Path $scriptDir 'logs' }
+
+# 在打印启动信息之前初始化日志：后面的所有 Write-Host 都会自动入日志
+Initialize-Log -LogDirectory $LogDir -Prefix '一键拆弹'
+if ($script:LogWriter) {
+    # 记录本次命令行参数（-DryRun 时不会走到这里）
+    $paramParts = @()
+    foreach ($key in $PSBoundParameters.Keys) {
+        $value = $PSBoundParameters[$key]
+        if ($value -is [switch]) {
+            if ($value.IsPresent) { $paramParts += "-$key" }
+        }
+        elseif ($value -is [bool]) {
+            if ($value) { $paramParts += "-$key" }
+        }
+        else {
+            $paramParts += "-$key `"$value`""
+        }
+    }
+    Write-Log ("参数: " + ($paramParts -join ' '))
+    Write-Log "目录: $Directory"
+}
+
 $beepScript = Join-Path $scriptDir 'beep_filter.py'
 if (-not (Test-Path -LiteralPath $beepScript)) { throw "找不到 beep_filter.py: $beepScript" }
 
@@ -703,6 +933,7 @@ $flvs = @(
 
 if ($flvs.Count -eq 0) {
     Write-Warn "目录中没有可处理的 .flv 文件: $Directory"
+    Close-Log -ExitCode 0
     exit 0
 }
 Write-Host "  待处理   : $($flvs.Count) 个 flv" -ForegroundColor Gray
@@ -841,7 +1072,7 @@ foreach ($flv in $flvs) {
     }
     else {
         Write-Host "   Step 1 消音中（Whisper $ModelSize）..." -ForegroundColor Gray
-        $pyArgs = @($beepScript, $flv.FullName, '--model-size', $ModelSize)
+        $pyArgs = @($beepScript, $flv.FullName, '--model-size', $ModelSize, '--no-log')
         $code = Invoke-External -Exe $PythonPath -Arguments $pyArgs -WorkingDirectory $scriptDir
 
         $muteOk = ($code -eq 0)
@@ -1025,7 +1256,7 @@ foreach ($flv in $flvs) {
                     '-max_muxing_queue_size', '1024',
                     '-y', $danmakuPath
                 )
-                $code = Invoke-External -Exe $FFmpegPath -Arguments $ffArgs -WorkingDirectory $workDir
+                $code = Invoke-External -Exe $FFmpegPath -Arguments $ffArgs -WorkingDirectory $workDir -CaptureFfmpegReport
             }
             else {
                 $code = -1
@@ -1170,5 +1401,9 @@ else {
     Write-Host '本场直播未发现异常情况。' -ForegroundColor Green
 }
 
-if ($failed -gt 0) { exit 1 }
+if ($failed -gt 0) {
+    Close-Log -ExitCode 1
+    exit 1
+}
+Close-Log -ExitCode 0
 exit 0

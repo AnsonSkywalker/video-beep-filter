@@ -21,6 +21,7 @@ FLV 视频自动消音工具 —— 支付宝收款语音消音器
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import sys
 import tempfile
 import time
 import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
@@ -51,6 +53,174 @@ TARGET_KEYWORDS = [
 # ffmpeg 查找路径
 FFMPEG_DEFAULT = "ffmpeg"
 FFPROBE_DEFAULT = "ffprobe"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  运行日志（控制台 + logs/*.log 双写）
+# ═══════════════════════════════════════════════════════════════════════
+
+_LOG_STREAM = None
+_LOG_PATH: Path | None = None
+_LOG_STARTED = time.time()
+
+
+class _Tee:
+    """把写入同时转发到控制台和日志文件。
+
+    只包住 sys.stdout / sys.stderr，原有 print 和异常 traceback 无需改动。
+    日志写失败时静默跳过，绝不因为日志问题中断消音主流程。
+    """
+
+    def __init__(self, primary, secondary):
+        self._primary = primary
+        self._secondary = secondary
+        self._at_line_start = True
+
+    def write(self, data):
+        self._primary.write(data)
+        try:
+            # 日志侧逐行加时间戳；控制台保持原样（input 提示等半行也只写一次）
+            for chunk in data.splitlines(keepends=True):
+                if self._at_line_start:
+                    self._secondary.write(f"[{datetime.now().strftime('%H:%M:%S')}] ")
+                self._secondary.write(chunk)
+                self._at_line_start = chunk.endswith(("\n", "\r"))
+            self._secondary.flush()
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        try:
+            self._primary.flush()
+        except Exception:
+            pass
+        try:
+            self._secondary.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        return self._primary.isatty()
+
+    def fileno(self):
+        return self._primary.fileno()
+
+    def __getattr__(self, name):
+        return getattr(self._primary, name)
+
+
+def _default_log_dir() -> Path:
+    """默认日志目录：脚本所在目录下的 logs。"""
+    return Path(__file__).resolve().parent / "logs"
+
+
+def _safe_filename_part(text: str, limit: int = 60) -> str:
+    """清掉 Windows 文件名非法字符，避免视频名里带 : ? * 时建不了日志。"""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text).strip(" .")
+    return cleaned[:limit] or "input"
+
+
+def log_note(message: str) -> None:
+    """只写日志文件，不重复打印到控制台。"""
+    if _LOG_STREAM is None:
+        return
+    try:
+        _LOG_STREAM.write(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+        _LOG_STREAM.flush()
+    except Exception:
+        pass
+
+
+def close_logging() -> None:
+    """恢复原始 stdout/stderr 并关闭日志文件。"""
+    global _LOG_STREAM
+    if _LOG_STREAM is None:
+        return
+    try:
+        if isinstance(sys.stdout, _Tee):
+            sys.stdout = sys.stdout._primary
+        if isinstance(sys.stderr, _Tee):
+            sys.stderr = sys.stderr._primary
+    except Exception:
+        pass
+    try:
+        _LOG_STREAM.flush()
+        _LOG_STREAM.close()
+    except Exception:
+        pass
+    _LOG_STREAM = None
+
+
+def log_finish(exit_code: int) -> None:
+    """在已知退出点写结束信息；重复调用时自动跳过。"""
+    if _LOG_STREAM is None:
+        return
+    elapsed = time.time() - _LOG_STARTED
+    log_note("")
+    log_note(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_note(f"总耗时: {elapsed:.1f}s")
+    log_note(f"退出码: {exit_code}")
+    close_logging()
+
+
+def _atexit_log_finish() -> None:
+    """未捕获异常 / Ctrl+C 退出时也补一条结束记录（正常路径已关闭，自动跳过）。"""
+    if _LOG_STREAM is not None:
+        log_finish(1)
+
+
+def setup_logging(log_dir: str | None, input_path: Path, manual: bool, no_log: bool) -> None:
+    """建立本次运行的日志；失败时只警告，不影响主流程。"""
+    global _LOG_STREAM, _LOG_PATH
+    if no_log:
+        return
+    try:
+        base = Path(log_dir).expanduser() if log_dir else _default_log_dir()
+        base.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        mode = "manual" if manual else "auto"
+        stem = _safe_filename_part(input_path.stem)
+        path = base / f"beep_filter_{mode}_{stem}_{stamp}.log"
+        index = 2
+        while path.exists():
+            path = base / f"beep_filter_{mode}_{stem}_{stamp}_{index}.log"
+            index += 1
+
+        stream = open(path, "a", encoding="utf-8", buffering=1)
+        _LOG_STREAM = stream
+        _LOG_PATH = path
+        sys.stdout = _Tee(sys.stdout, stream)
+        sys.stderr = _Tee(sys.stderr, stream)
+        atexit.register(_atexit_log_finish)
+
+        log_note("=" * 60)
+        log_note("  beep_filter.py 运行日志")
+        log_note("=" * 60)
+        log_note(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        log_note(f"命令行: {' '.join(sys.argv)}")
+        log_note(f"输入: {input_path}")
+        log_note(f"模式: {'--manual（手动时间戳）' if manual else '自动（Whisper 识别）'}")
+        log_note(f"Python: {sys.version.split()[0]}")
+        log_note(f"日志: {path}")
+        log_note("")
+    except Exception as exc:
+        # 日志初始化失败不能影响主流程
+        try:
+            if isinstance(sys.stdout, _Tee):
+                sys.stdout = sys.stdout._primary
+            if isinstance(sys.stderr, _Tee):
+                sys.stderr = sys.stderr._primary
+        except Exception:
+            pass
+        if _LOG_STREAM is not None:
+            try:
+                _LOG_STREAM.close()
+            except Exception:
+                pass
+        _LOG_STREAM = None
+        _LOG_PATH = None
+        print(f"  ⚠ 无法创建运行日志（{exc}），本次不写日志", file=sys.__stderr__ or sys.stderr)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -168,6 +338,9 @@ def input_manual_timestamps() -> List[Tuple[float, float]]:
             raw = input("  > ").strip()
         except EOFError:
             break
+
+        # 输入不回显到 stdout，单独记进日志，事后能核对当时到底填了哪些时间点
+        log_note(f"  > {raw}")
 
         if not raw:
             continue  # 空行不退出，方便粘贴后手动输入 q
@@ -546,6 +719,7 @@ def process_video(
         print(f"\n  ✅ 处理完成！输出文件: {output_path}")
     except subprocess.CalledProcessError as e:
         print(f"\n  ❌ ffmpeg 处理失败 (code={e.returncode})")
+        log_finish(1)
         sys.exit(1)
 
 
@@ -577,9 +751,11 @@ def ensure_deps():
     except subprocess.CalledProcessError as e:
         print(f"\n  ❌ 安装失败: {e}")
         print("  请手动运行: pip install openai-whisper")
+        log_finish(1)
         sys.exit(1)
     except subprocess.TimeoutExpired:
         print(f"\n  ❌ 安装超时，请手动运行: pip install openai-whisper")
+        log_finish(1)
         sys.exit(1)
 
     print("✅ 依赖安装完成\n")
@@ -624,6 +800,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="仅显示识别结果，不处理音频")
     parser.add_argument("--keep-wav", action="store_true",
                         help="保留中间 WAV 文件（调试用）")
+    parser.add_argument("--log-dir", default=None,
+                        help="运行日志目录（默认: 脚本所在目录\\logs）")
+    parser.add_argument("--no-log", action="store_true",
+                        help="不写运行日志（供批量脚本调用时避免重复记录）")
     return parser.parse_args(argv)
 
 
@@ -633,6 +813,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main():
     args = parse_args()
+    # 先建立日志，再打印 banner：这样本次运行的所有 print / traceback 都会进日志
+    setup_logging(args.log_dir, Path(args.input), args.manual, args.no_log)
     print_banner()
 
     # ── 检查 ffmpeg ──
@@ -646,11 +828,13 @@ def main():
         subprocess.run([ffmpeg, "-version"], capture_output=True, check=True)
     except Exception:
         print(f"\n  ❌ ffmpeg 不可用！请先安装 ffmpeg 并加入 PATH。")
+        log_finish(1)
         sys.exit(1)
 
     input_path = Path(args.input)
     if not input_path.is_file():
         print(f"\n  ❌ 输入文件不存在: {input_path}")
+        log_finish(1)
         sys.exit(1)
     print(f"  📁 输入:   {input_path}")
 
@@ -662,6 +846,7 @@ def main():
         output_path = input_path.with_name(f"{stem}_消音版{input_path.suffix}")
     if not args.manual:
         print(f"  📁 输出:   {output_path}")
+        log_note(f"输出: {output_path}")
 
     # ── 手动模式（跳过 Whisper）──
     if args.manual:
@@ -669,9 +854,11 @@ def main():
         stem = re.sub(r'[<>:"/\\|?*]', '_', input_path.stem)
         output_path = input_path.with_name(f"{stem}_手动修改{input_path.suffix}")
         print(f"  \U0001f4c1 输出:   {output_path}")
+        log_note(f"输出: {output_path}")
         intervals = input_manual_timestamps()
         if not intervals:
             print("\n  ❌ 未输入任何有效区间，退出。")
+            log_finish(1)
             sys.exit(1)
         process_video(
             ffmpeg, ffprobe,
@@ -686,6 +873,7 @@ def main():
         else:
             print(f"  ✅ 全部完成！{output_path}")
         print("=" * 60 + "\n")
+        log_finish(0)
         return
 
     # ── 检查依赖 ──
@@ -694,6 +882,8 @@ def main():
     if not ready:
         # 依赖刚安装完，需要重启进程
         print("  🔄 重启进程以加载新安装的依赖...")
+        log_note("依赖安装完成，重启进程以加载；新进程会新建一份日志")
+        close_logging()
         os.execv(sys.executable, [sys.executable] + sys.argv)
         # execv 不返回
 
@@ -764,6 +954,7 @@ def main():
     else:
         print(f"  ✅ 全部完成！{output_path}")
     print(f"{'=' * 60}\n")
+    log_finish(0)
 
 
 if __name__ == "__main__":
