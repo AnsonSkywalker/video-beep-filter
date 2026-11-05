@@ -25,7 +25,12 @@
 
     要点：
       * 不修改任何原始 flv / ass / xml 文件，也不修改已有的「一键拆弹.ps1」。
-      * 烧录必须重新编码视频流，音频流直接复制（-c:a copy），无二次损失。
+      * 烧录必须重新编码视频流；音频流改为重编 AAC，并按采样重新生成连续时间戳。
+        源 FLV 可能带录制空洞或时间戳倒流（分段拼接/推流中断），直接 -c:a copy
+        会把跳变带进成品，平台会以「该视频内部存在时间戳跳变」拒收。
+        检测到这类异常时，才按源标称帧率把视频补成恒定帧率（CFR），空洞用
+        重复帧/静音补齐；正常文件保持原帧率/时间戳，不做多余补帧或丢帧。
+        两种情况下都保持原有播放时间轴与弹幕时间轴不变。
       * 默认自动优先使用 NVIDIA NVENC 硬件编码，不可用时回退 libx264。
       * 若某 flv 没有同名弹幕文件，则跳过 Step 2，其成品就是 _消音版.flv。
       * 出于过审考虑，Step 2 绝不会退回去烧录「未消音」的原片：
@@ -744,6 +749,84 @@ function Get-VideoDuration {
     return 0.0
 }
 
+# 读视频的「标称帧率」，用于把时间戳塌陷/带空洞的源补成恒定帧率（CFR）。
+# 优先 avg_frame_rate，其次 r_frame_rate；两者都可能是伪值（例如 1000/1），
+# 超出 1..120 就不采信，返回 0 让调用方退回「只重编音频、不强制 CFR」。
+function Get-VideoFrameRate {
+    param([string]$FFprobe, [string]$Path)
+    if (-not $FFprobe) { return 0.0 }
+    $out = & $FFprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate,r_frame_rate -of default=nw=1 -- $Path 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $out) { return 0.0 }
+
+    $avg = 0.0
+    $r = 0.0
+    foreach ($line in $out) {
+        $text = $line.ToString().Trim()
+        if ($text -match '^avg_frame_rate=(\d+)/(\d+)$') {
+            $den = [double]$Matches[2]
+            if ($den -gt 0) { $avg = [double]$Matches[1] / $den }
+        }
+        elseif ($text -match '^r_frame_rate=(\d+)/(\d+)$') {
+            $den = [double]$Matches[2]
+            if ($den -gt 0) { $r = [double]$Matches[1] / $den }
+        }
+    }
+    foreach ($fps in @($avg, $r)) {
+        if ($fps -ge 1.0 -and $fps -le 120.0) { return $fps }
+    }
+    return 0.0
+}
+
+# 成品时间戳自检：逐包比较相邻 DTS，检查「重复/倒退」与「过大间隔」。
+# 平台（B站等）会拒收带时间戳跳变的文件，所以出片后立刻验证一次；
+# 自检失败只告警并记入异常汇总，不删除已生成的成品。
+function Test-MediaTimestamps {
+    param(
+        [string]$FFprobe,
+        [string]$Path,
+        [double]$MaxGap = 1.0
+    )
+    $result = @{ Ok = $true; Issues = @() }
+    if (-not $FFprobe -or -not (Test-Path -LiteralPath $Path)) { return $result }
+
+    $out = & $FFprobe -v error -show_entries packet=stream_index,dts_time -of csv=p=0 -- $Path 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $out) { return $result }
+
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $prev = @{}
+    $back = @{}
+    $gap = @{}
+    foreach ($line in $out) {
+        $parts = $line.ToString().Trim() -split ','
+        if ($parts.Count -lt 2) { continue }
+        $idx = 0
+        if (-not [int]::TryParse($parts[0], [ref]$idx)) { continue }
+        $dts = 0.0
+        try { $dts = [double]::Parse($parts[1], $inv) } catch { continue }
+
+        if ($prev.ContainsKey($idx)) {
+            $delta = $dts - $prev[$idx]
+            if ($delta -le 0) {
+                $back[$idx] = 1 + $(if ($back.ContainsKey($idx)) { $back[$idx] } else { 0 })
+            }
+            elseif (-not $gap.ContainsKey($idx) -or $delta -gt $gap[$idx]) {
+                $gap[$idx] = $delta
+            }
+        }
+        $prev[$idx] = $dts
+    }
+
+    foreach ($idx in @($prev.Keys)) {
+        $b = if ($back.ContainsKey($idx)) { $back[$idx] } else { 0 }
+        $g = if ($gap.ContainsKey($idx)) { $gap[$idx] } else { 0 }
+        if ($b -gt 0 -or $g -gt $MaxGap) {
+            $result.Ok = $false
+            $result.Issues += "流 #${idx}: DTS 重复/倒退 ${b} 处，最大间隔 $([math]::Round($g, 3))s"
+        }
+    }
+    return $result
+}
+
 # 决定成品画布尺寸（同时也是 ASS 的 PlayRes）。
 # 把「容器声明的尺寸」和「采样到的各时间点尺寸」一起投票，取多数的那一种，
 # 这样即使录播一开头就是连麦的横屏段、后面才是正常竖屏，也能选对画布。
@@ -994,6 +1077,8 @@ foreach ($flv in $flvs) {
     # 消音版的分辨率/比例必然与原始文件一致，不必等中间产物生成。
     $probeTarget = $flv.FullName
     $canvas = Get-OutputCanvas -FFprobe $FFprobePath -FFmpeg $FFmpegPath -Path $probeTarget -Override $OutputSize
+    # 标称帧率：用于把时间戳塌陷/带空洞的源补成 CFR；探不到就只修音频
+    $srcFps = Get-VideoFrameRate -FFprobe $FFprobePath -Path $probeTarget
     $vfNorm = ''
     if ($canvas) {
         $cw = $canvas.Width
@@ -1251,8 +1336,40 @@ foreach ($flv in $flvs) {
                     '-hide_banner', '-nostdin', '-stats',
                     '-i', $mutedPath,
                     '-vf', $vfFull
-                ) + $vArgs + $containerArgs + @(
-                    '-c:a', 'copy',
+                )
+
+                # 时间戳修复：源 FLV 可能有录制空洞/时间戳倒流（分段拼接、推流中断），
+                # 直接重封装会把跳变带进成品，平台会以「时间戳跳变」拒收。
+                # 只有检测到异常时才按源标称帧率补成 CFR；正常文件保持原时间戳，
+                # 不做多余的补帧/丢帧（B站 30fps、抖音 18fps 都按各自源帧率）。
+                $needCfr = $false
+                if ($srcFps -ge 1.0) {
+                    # 正式运行时检查实际要烧的消音版；DryRun 还没生成它，退回查源文件
+                    $tsProbe = if (-not $DryRun -and (Test-Path -LiteralPath $mutedPath)) { $mutedPath } else { $probeTarget }
+                    $srcTs = Test-MediaTimestamps -FFprobe $FFprobePath -Path $tsProbe
+                    $needCfr = -not $srcTs.Ok
+                    if ($needCfr) {
+                        Write-Warn "源时间戳异常（$($srcTs.Issues -join '；')），烧录时启用 CFR 修复"
+                    }
+                    else {
+                        Write-Host '   时间戳   : 源时间戳正常，保持原帧率/时间戳' -ForegroundColor DarkGray
+                    }
+                }
+                else {
+                    Write-Warn '读不到标称帧率，视频保持原始时间戳（仅修复音频）'
+                }
+
+                if ($needCfr) {
+                    $fpsText = $srcFps.ToString('0.###', [System.Globalization.CultureInfo]::InvariantCulture)
+                    $ffArgs += @('-fps_mode', 'cfr', '-r', $fpsText)
+                }
+
+                # 音频始终重编：即使视频时间戳正常，源音频也可能有重复 DTS；
+                # aresample 按时间戳补静音 / 重采样，保证音频轨连续。
+                $ffArgs += $vArgs + $containerArgs + @(
+                    '-c:a', 'aac', '-b:a', '192k',
+                    '-af', 'aresample=async=1:first_pts=0',
+                    '-avoid_negative_ts', 'make_zero',
                     '-max_muxing_queue_size', '1024',
                     '-y', $danmakuPath
                 )
@@ -1274,6 +1391,23 @@ foreach ($flv in $flvs) {
                 $failed++
                 [void]$results.Add([pscustomobject]@{ File = $flv.Name; Status = '烧录失败'; Output = $mutedFinal; Extras = @() })
                 continue
+            }
+
+            # 出片后自检：平台会因为「时间戳跳变」拒收，不能等用户上传失败才发现。
+            if (-not $DryRun) {
+                $tsCheck = Test-MediaTimestamps -FFprobe $FFprobePath -Path $danmakuPath
+                if (-not $tsCheck.Ok) {
+                    $tsDetail = $tsCheck.Issues -join '；'
+                    Write-Warn "成品时间戳仍有异常：$tsDetail"
+                    [void]$anomalies.Add([pscustomobject]@{
+                            Kind   = '成品时间戳异常'
+                            File   = $flv.Name
+                            Detail = "$tsDetail（上传前请先用 -Force 重跑，或手工检查源文件）"
+                        })
+                }
+                else {
+                    Write-Host '   时间戳自检: 音视频 DTS 单调、无异常跳变' -ForegroundColor DarkGray
+                }
             }
 
             Write-Produced $danmakuPath
