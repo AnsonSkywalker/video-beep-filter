@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FLV 视频自动消音工具 —— 支付宝收款语音消音器
+录播视频自动消音工具 —— 支付宝收款语音消音器
 ================================================
 自动检测视频音频中 "六四""八九""64""89" 等数字语音，
 用「哔——」声替代，帮助视频过审。
@@ -401,7 +401,7 @@ def format_time(seconds: float) -> str:
 def print_banner():
     print()
     print("=" * 60)
-    print("  🎯  FLV 视频自动消音工具")
+    print("  🎯  录播视频自动消音工具")
     print("  自动检测「六四」「八九」等数字语音 → 哔声替代")
     print("=" * 60)
 
@@ -768,11 +768,12 @@ def ensure_deps():
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="FLV 视频自动消音工具 —— 自动检测「六四」「八九」等数字语音并用哔声替代",
+        description="录播视频自动消音工具 —— 自动检测「六四」「八九」等数字语音并用哔声替代",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "使用示例:\n"
             "  python beep_filter.py D:\\视频\\录制.flv\n"
+            "  python beep_filter.py D:\\视频\\录制.ts     # TS 录播同样支持\n"
             "  python beep_filter.py D:\\视频\\录制.flv -o 消音版.flv --model-size small\n"
             "  python beep_filter.py D:\\视频\\录制.flv --dry-run    # 仅查看识别结果\n"
             "  python beep_filter.py D:\\视频\\录制.flv --padding 0.3\n"
@@ -780,7 +781,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "  python beep_filter.py D:\\视频\\录制.flv --review-model small   # 双重检测\n"
         ),
     )
-    parser.add_argument("input", help="输入视频文件路径（支持 FLV/MP4/AVI/MKV 等）")
+    parser.add_argument("input", help="输入视频文件路径（支持 FLV/TS/MP4/AVI/MKV 等）")
     parser.add_argument("-o", "--output", help="输出文件路径（默认: 输入文件名_消音版.扩展名）")
     parser.add_argument("--ffmpeg-path", default=FFMPEG_DEFAULT, help="ffmpeg 路径")
     parser.add_argument("--ffprobe-path", default=FFPROBE_DEFAULT, help="ffprobe 路径")

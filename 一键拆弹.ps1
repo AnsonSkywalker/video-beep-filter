@@ -1,12 +1,12 @@
 ﻿<#
 .SYNOPSIS
-    一键拆弹：对 FLV 直播录播做音频消音，按来源处理弹幕，统一输出 MP4。
+    一键拆弹：对直播录播视频（FLV / TS 等）做音频消音，按来源处理弹幕，统一输出 MP4。
 
 .DESCRIPTION
     唯一入口：自动识别抖音 / B站 / 小红书录播，按来源决定是否烧录弹幕。
 
-      Step 1  对目录下每个 *.flv 调用 beep_filter.py 消音
-              → 生成 <原名>_消音版.flv（中间产物）
+      Step 1  对目录下每个录播视频（.flv / .ts）调用 beep_filter.py 消音
+              → 生成 <原名>_消音版.<原扩展名>（中间产物）
       Step 2  按同名弹幕文件与素材特征识别来源：
                 * 抖音（同名 .ass，DanmakuRender 录制）→ 适配画布后直接烧录
                 * B站（同名 .xml，录播姬导出）→ 先用 bili_danmaku_to_ass.py 转成
@@ -20,21 +20,21 @@
     成品与命名规则：
       * 成品默认导出为 MP4（源本就是 h264+aac，封装 mp4 无额外损失，
         且 mp4 对抖音/B站/小红书/微信等平台的上传兼容性最好）。可用 -Container 改成 mov / mkv。
-      * 默认只保留最终成品，成功后自动删掉 _消音版.flv 中间产物；
+      * 默认只保留最终成品，成功后自动删掉 _消音版.<原扩展名> 中间产物；
         需要留下仅消音的视频时加 -KeepMuted。
       * 按录播来源给成品文件名加前缀：抖音 → 抖音-，B站 → B站-，小红书 → 小红书-。
         前缀对「带弹幕」和「仅消音」两种成品都生效。
 
     要点：
-      * 不修改任何原始 flv / ass / xml 文件。
+      * 不修改任何原始视频 / ass / xml 文件。
       * 烧录必须重新编码视频流；音频流改为重编 AAC，并按采样重新生成连续时间戳。
-        源 FLV 可能带录制空洞或时间戳倒流（分段拼接/推流中断），直接 -c:a copy
+        源录播文件可能带录制空洞或时间戳倒流（分段拼接/推流中断），直接 -c:a copy
         会把跳变带进成品，平台会以「该视频内部存在时间戳跳变」拒收。
         检测到这类异常时，才按源标称帧率把视频补成恒定帧率（CFR），空洞用
         重复帧/静音补齐；正常文件保持原帧率/时间戳，不做多余补帧或丢帧。
         两种情况下都保持原有播放时间轴与弹幕时间轴不变。
       * 默认自动优先使用 NVIDIA NVENC 硬件编码，不可用时回退 libx264。
-      * 若某 flv 没有同名弹幕文件（当前为小红书），跳过弹幕烧录，但仍把消音版
+      * 若某个视频没有同名弹幕文件（当前为小红书），跳过弹幕烧录，但仍把消音版
         转封装为 MP4：成品为 <平台前缀><原名>_消音版.mp4。
       * 出于过审考虑，Step 2 绝不会退回去烧录「未消音」的原片：
         找不到消音版输出时只报错跳过。
@@ -152,7 +152,7 @@
     想核对最终生效的关键词清单：`python danmaku_censor.py --list-keywords`
 
 .PARAMETER SkipMute
-    跳过消音，仅复用已存在的 _消音版.flv：有弹幕就烧录，无弹幕就转封装 MP4。
+    跳过消音，仅复用已存在的 _消音版.<原扩展名>：有弹幕就烧录，无弹幕就转封装 MP4。
 
 .PARAMETER SkipDanmaku
     跳过弹幕烧录，只出仅消音的 MP4 成品（成品名仍按平台加前缀）。
@@ -166,6 +166,19 @@
 
 .PARAMETER DryRun
     只打印将执行的命令，不实际执行（不产生/删除/改名任何文件）。
+    交互式控制台会在打印清单/预估后等待回车；非交互式自动继续。
+
+.PARAMETER Yes
+    DryRun 预览时跳过“按 Enter 继续”的确认。正式运行本来就不暂停。
+
+.PARAMETER NoEstimate
+    关闭启动清单里的耗时预估，同时不读取/不追加 logs\run_stats.jsonl；DryRun 也不暂停。
+    已有统计文件不会被删除，只是本次不使用。
+
+.PARAMETER HistoryRuns
+    预估使用最近多少次运行的有效样本，默认 5。样本不足时用现有的全部运行；
+    只有完全没有任何运行记录时才提示数据不足。首次没有统计文件时，会从
+    logs\一键拆弹_*.log 回填最多 5 次运行作为初始基准。
 
 .PARAMETER NoNotify
     全部完成后不发送 Windows 通知。默认会发送一条桌面通知
@@ -180,7 +193,7 @@
 
 .EXAMPLE
     .\一键拆弹.ps1
-    处理脚本所在目录的全部 flv：自动识别平台；有弹幕就烧录，无弹幕就只出消音 MP4。
+    处理脚本所在目录的全部录播视频（.flv / .ts）：自动识别平台；有弹幕就烧录，无弹幕就只出消音 MP4。
 
 .EXAMPLE
     .\一键拆弹.ps1 -Directory "D:\录播" -ModelSize large
@@ -248,6 +261,9 @@ param(
     [switch]$KeepMuted,
     [switch]$Force,
     [switch]$DryRun,
+    [switch]$Yes,
+    [switch]$NoEstimate,
+    [int]$HistoryRuns = 5,
     [switch]$NoNotify,
     [string]$LogDir
 )
@@ -362,6 +378,684 @@ function Close-Log {
     }
 }
 
+# ---------- 运行统计（耗时预估基准） ----------
+# 一行一次运行的 JSONL，默认放在 logs\run_stats.jsonl。
+# 只记录文件名（不含目录）、视频秒数、大小、各阶段耗时、模型/编码器与时间戳；
+# 不写主机名、用户名、IP、MAC 或完整路径——logs\ 已在 .gitignore 里整目录忽略。
+# 读取时逐行解析，坏行/空行直接跳过；写入失败只警告，不影响主流程。
+$script:RunStatsKeep = 50
+
+function Get-RunStatsPath {
+    param([string]$LogDirectory)
+    if (-not $LogDirectory) { $LogDirectory = $LogDir }
+    if (-not $LogDirectory) { return $null }
+    return (Join-Path $LogDirectory 'run_stats.jsonl')
+}
+
+function Read-RunStats {
+    param([string]$Path)
+    $runs = New-Object System.Collections.ArrayList
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return @() }
+    try {
+        foreach ($line in [System.IO.File]::ReadLines($Path, [System.Text.Encoding]::UTF8)) {
+            if (-not $line -or -not $line.Trim()) { continue }
+            try {
+                $obj = $line | ConvertFrom-Json
+                if ($null -ne $obj) { [void]$runs.Add($obj) }
+            }
+            catch {
+                # 单行损坏（手工编辑/写入中断）不应该让整份基准失效
+                Write-Log "运行统计有坏行，已跳过: $($_.Exception.Message)"
+            }
+        }
+    }
+    catch {
+        Write-Warn "读取运行统计失败（$($_.Exception.Message)），本次按无历史基准处理"
+    }
+    return @($runs)
+}
+
+function New-RunStatsRecord {
+    param(
+        [datetime]$StartedAt,
+        [datetime]$EndedAt,
+        [string]$Model,
+        [string]$Encoder,
+        [string]$Source,          # live / backfill
+        [object[]]$Files,
+        [double]$EstimateSeconds = 0
+    )
+    $fileList = @()
+    foreach ($f in @($Files)) {
+        if (-not $f) { continue }
+        $fileList += [pscustomobject]@{
+            # 只留文件名：日志/统计文件里不出现真实目录
+            Name          = [System.IO.Path]::GetFileName([string]$f.Name)
+            DurationSec   = [math]::Round([double]$f.DurationSec, 3)
+            SizeBytes     = [long]$f.SizeBytes
+            MuteSec       = [math]::Round([double]$f.MuteSec, 1)
+            BurnSec       = [math]::Round([double]$f.BurnSec, 1)
+            RemuxSec      = [math]::Round([double]$f.RemuxSec, 1)
+            ProbeSec      = [math]::Round([double]$f.ProbeSec, 1)
+            TotalSec      = [math]::Round([double]$f.TotalSec, 1)
+            Mode          = [string]$f.Mode
+            Failed        = [bool]$f.Failed
+        }
+    }
+    $actualSeconds = 0.0
+    foreach ($f in @($fileList)) { $actualSeconds += [double]$f.TotalSec }
+    return [pscustomobject]@{
+        Version         = 1
+        Source          = $Source
+        StartedAt       = $StartedAt.ToString('o')
+        EndedAt         = $EndedAt.ToString('o')
+        Model           = $Model
+        Encoder         = $Encoder
+        EstimateSeconds = [math]::Round($EstimateSeconds, 1)
+        ActualSeconds   = [math]::Round($actualSeconds, 1)
+        Files           = @($fileList)
+    }
+}
+
+function Add-RunStatsRecord {
+    param(
+        [string]$Path,
+        [object]$Record,
+        [int]$Keep = $script:RunStatsKeep
+    )
+    if (-not $Path -or -not $Record) { return $false }
+    $tmp = $Path + '.tmp'
+    try {
+        $dir = Split-Path -Parent $Path
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        $json = $Record | ConvertTo-Json -Depth 8 -Compress
+        [System.IO.File]::AppendAllText($Path, $json + [Environment]::NewLine, $script:LogEncoding)
+
+        # 只保留最近 N 条；重写时先写临时文件再替换，避免中途失败留下半份文件
+        $lines = @([System.IO.File]::ReadLines($Path, [System.Text.Encoding]::UTF8))
+        if ($lines.Count -gt $Keep) {
+            $tail = $lines[($lines.Count - $Keep)..($lines.Count - 1)]
+            [System.IO.File]::WriteAllLines($tmp, $tail, $script:LogEncoding)
+            Move-Item -LiteralPath $tmp -Destination $Path -Force
+        }
+        return $true
+    }
+    catch {
+        if (Test-Path -LiteralPath $tmp) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        }
+        Write-Warn "写入运行统计失败（$($_.Exception.Message)），不影响本次处理"
+        return $false
+    }
+}
+
+# 运行结束写一条 live 记录；DryRun / -NoEstimate / 没有实际处理的文件时不写。
+function Save-RunStats {
+    param(
+        [string]$Path,
+        [object[]]$Files,
+        [string]$Model,
+        [string]$Encoder,
+        [datetime]$StartedAt,
+        [datetime]$EndedAt,
+        [double]$EstimateSeconds = 0
+    )
+    if ($DryRun -or $NoEstimate) { return $false }
+    if (-not $Path -or @($Files).Count -eq 0) { return $false }
+    $record = New-RunStatsRecord -StartedAt $StartedAt -EndedAt $EndedAt -Model $Model -Encoder $Encoder `
+        -Source 'live' -Files @($Files) -EstimateSeconds $EstimateSeconds
+    return (Add-RunStatsRecord -Path $Path -Record $record -Keep $script:RunStatsKeep)
+}
+
+function Format-DurationText {
+    param([double]$Seconds)
+    if ($Seconds -le 0) { return '00:00:00' }
+    $ts = [TimeSpan]::FromSeconds([math]::Round($Seconds))
+    $hours = [math]::Floor($ts.TotalHours)
+    return ('{0:00}:{1:00}:{2:00}' -f $hours, $ts.Minutes, $ts.Seconds)
+}
+
+function Format-SizeText {
+    param([long]$Bytes)
+    if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ('{0:N0} MB' -f ($Bytes / 1MB)) }
+    if ($Bytes -ge 1KB) { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
+    return "$Bytes B"
+}
+
+function Format-EtaText {
+    param([double]$Seconds)
+    if ($Seconds -le 0) { return '0 秒' }
+    $total = [int][math]::Round($Seconds)
+    $h = [int][math]::Floor($total / 3600)
+    $m = [int][math]::Floor(($total % 3600) / 60)
+    $s = $total % 60
+    if ($h -gt 0) { return "$h 小时 $m 分" }
+    if ($m -gt 0) { return "$m 分 $s 秒" }
+    return "$s 秒"
+}
+
+# 从历史运行日志回填最近几次「有效运行」，替代用户先手动跑 3 次收集基准。
+# 日志格式见 Write-Log：每行 [HH:mm:ss] 文本；每个文件以 "── [文件名]" 开头，
+# Step 1 行到 "_消音版.<扩展名> 已生成" 是消音阶段，Step 2 行到最终成品 "已生成"
+# 是烧录/转封装阶段，段开始到 Step 1 是画布探测等固定开销。
+# 只回填有视频时长、有阶段耗时且未失败/未跳过的文件；解析不出来的日志跳过。
+function Import-LegacyRunStats {
+    param(
+        [string]$LogDirectory,
+        [int]$WantedRuns = 5,
+        [int]$MaxLogs = 12
+    )
+    $runs = New-Object System.Collections.ArrayList
+    if (-not $LogDirectory -or -not (Test-Path -LiteralPath $LogDirectory)) { return @() }
+
+    # 结束一个文件段并把它转成统计样本（哈希表按引用修改）
+    $finishFile = {
+        param($f, $endTime, $list)
+        if (-not $f) { return }
+        if (-not $endTime) { $endTime = $f.StartTime }
+        $f.EndTime = $endTime
+        $f.TotalSec = [math]::Max(0.0, ($endTime - $f.StartTime).TotalSeconds)
+
+        if ($f.MuteStart -and $f.MuteEnd) {
+            $f.MuteSec = [math]::Max(0.0, ($f.MuteEnd - $f.MuteStart).TotalSeconds)
+        }
+        if ($f.Step2Start) {
+            $finishEnd = if ($f.FinishEnd) { $f.FinishEnd } else { $endTime }
+            $finishSec = [math]::Max(0.0, ($finishEnd - $f.Step2Start).TotalSeconds)
+            if ($f.Mode -eq 'burn') { $f.BurnSec = $finishSec }
+            elseif ($f.Mode -eq 'remux') { $f.RemuxSec = $finishSec }
+        }
+        $probeStart = if ($f.MuteStart) { $f.MuteStart } elseif ($f.Step2Start) { $f.Step2Start } else { $null }
+        if ($probeStart) {
+            $f.ProbeSec = [math]::Max(0.0, ($probeStart - $f.StartTime).TotalSeconds)
+        }
+
+        $stageTotal = [double]$f.MuteSec + [double]$f.BurnSec + [double]$f.RemuxSec
+        if ($f.DurationSec -gt 0 -and -not $f.Failed -and -not $f.Skip -and $stageTotal -gt 0) {
+            [void]$list.Add([pscustomobject]@{
+                    Name        = $f.Name
+                    DurationSec = [double]$f.DurationSec
+                    SizeBytes   = [long]0
+                    MuteSec     = [double]$f.MuteSec
+                    BurnSec     = [double]$f.BurnSec
+                    RemuxSec    = [double]$f.RemuxSec
+                    ProbeSec    = [double]$f.ProbeSec
+                    TotalSec    = [double]$f.TotalSec
+                    Mode        = [string]$f.Mode
+                    Failed      = $false
+                })
+        }
+    }
+
+    try {
+        $logFiles = @(Get-ChildItem -LiteralPath $LogDirectory -Filter '一键拆弹_*.log' -File -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                Select-Object -First $MaxLogs)
+
+    foreach ($log in $logFiles) {
+        # 文件名带运行开始时间，先用它做日期基准，避免日志头尚未解析时跨天判断出错
+        $nameMatch = [regex]::Match($log.Name, '^一键拆弹_(\d{8})_(\d{6})')
+        if (-not $nameMatch.Success) { continue }
+        $startedAt = [datetime]::MinValue
+        $parsedNameTime = [datetime]::TryParseExact(
+            $nameMatch.Groups[1].Value + $nameMatch.Groups[2].Value,
+            'yyyyMMddHHmmss',
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::None,
+            [ref]$startedAt)
+        if (-not $parsedNameTime) { continue }
+
+        $baseDate = $startedAt.Date
+        $endedAt = $null
+        $model = 'unknown'
+        $encoder = 'unknown'
+        $current = $null
+        $files = New-Object System.Collections.ArrayList
+        $lastTime = $null
+
+        try {
+            foreach ($line in [System.IO.File]::ReadLines($log.FullName, [System.Text.Encoding]::UTF8)) {
+                $mTime = [regex]::Match($line, '^\[(\d{2}):(\d{2}):(\d{2})\]\s?(.*)$')
+                if (-not $mTime.Success) { continue }
+                $t = $baseDate.AddHours([int]$mTime.Groups[1].Value).
+                    AddMinutes([int]$mTime.Groups[2].Value).
+                    AddSeconds([int]$mTime.Groups[3].Value)
+                # 日志跨天：时间倒退就按第二天算
+                if ($null -ne $lastTime -and $t -lt $lastTime) { $t = $t.AddDays(1) }
+                $lastTime = $t
+                $text = $mTime.Groups[4].Value
+
+                # ---- 运行级元数据 ----
+                if ($text -match '^\s*开始时间:\s*(.+)$') {
+                    $parsed = [datetime]::MinValue
+                    if ([datetime]::TryParse($Matches[1].Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+                        $startedAt = $parsed
+                        $baseDate = $parsed.Date
+                    }
+                    continue
+                }
+                if ($text -match '^\s*结束时间:\s*(.+)$') {
+                    $parsed = [datetime]::MinValue
+                    if ([datetime]::TryParse($Matches[1].Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+                        $endedAt = $parsed
+                    }
+                    continue
+                }
+                if ($text -match '^\s*模型\s*:\s*([A-Za-z0-9_.-]+)') { $model = $Matches[1]; continue }
+                if ($text -match '^\s*编码器\s*:\s*([A-Za-z0-9_.-]+)') { $encoder = $Matches[1]; continue }
+
+                # ---- 文件段边界 ----
+                if ($text -match '^\s*──\s*\[(.+)\]\s*$') {
+                    if ($current) { & $finishFile $current $t $files }
+                    $current = @{
+                        Name        = $Matches[1]
+                        StartTime   = $t
+                        EndTime     = $null
+                        MuteStart   = $null
+                        MuteEnd     = $null
+                        Step2Start  = $null
+                        FinishEnd   = $null
+                        MuteSec     = 0.0
+                        BurnSec     = 0.0
+                        RemuxSec    = 0.0
+                        ProbeSec    = 0.0
+                        TotalSec    = 0.0
+                        DurationSec = 0.0
+                        Mode        = ''
+                        Failed      = $false
+                        Skip        = $false
+                    }
+                    continue
+                }
+                if ($text -match '^\s*=====\s*处理汇总') {
+                    if ($current) { & $finishFile $current $t $files; $current = $null }
+                    continue
+                }
+                if (-not $current) { continue }
+
+                # ---- 文件段内的阶段时间点 ----
+                if ($text -match '^\s*Step 1 消音中') {
+                    $current.MuteStart = $t
+                    continue
+                }
+                if ($text -match '^\s*Step 2\s+(烧录弹幕|仅消音转封装)') {
+                    $current.Step2Start = $t
+                    $current.Mode = if ($Matches[1] -eq '烧录弹幕') { 'burn' } else { 'remux' }
+                    continue
+                }
+                if ($text -match '^\s*\[OK\]\s+已生成\s+(.+)$') {
+                    $generated = $Matches[1].Trim()
+                    # 中间产物扩展名跟随源容器（.flv / .ts 等）；只认 "_消音版.<扩展名>"，
+                    # 不会误匹配最终成品 "_消音版_弹幕版.mp4"。
+                    if ($generated -match '_消音版\.[^.]+$') {
+                        $current.MuteEnd = $t
+                    }
+                    elseif ($current.Step2Start -and -not $current.FinishEnd) {
+                        $current.FinishEnd = $t
+                    }
+                    continue
+                }
+                if ($text -match '^\s*Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)') {
+                    if ($current.DurationSec -le 0) {
+                        $current.DurationSec = [double]$Matches[1] * 3600 + [double]$Matches[2] * 60 + [double]$Matches[3]
+                    }
+                    continue
+                }
+                if ($text -match '已存在成品') { $current.Skip = $true; continue }
+                if ($text -match '^\s*\[失败\]') { $current.Failed = $true; continue }
+            }
+        }
+        catch {
+            Write-Log "解析历史日志失败（$($log.Name)）：$($_.Exception.Message)"
+        }
+        if ($current) {
+            $endForFile = if ($lastTime) { $lastTime } else { $current.StartTime }
+            & $finishFile $current $endForFile $files
+            $current = $null
+        }
+
+        if ($files.Count -gt 0) {
+            $endForRecord = if ($endedAt) { $endedAt } elseif ($lastTime) { $lastTime } else { $startedAt }
+            $run = New-RunStatsRecord -StartedAt $startedAt -EndedAt $endForRecord `
+                -Model $model -Encoder $encoder -Source 'backfill' -Files @($files)
+            [void]$runs.Add($run)
+            if ($runs.Count -ge $WantedRuns) { break }
+        }
+    }
+    }
+    catch {
+        Write-Log "回填历史日志失败：$($_.Exception.Message)"
+    }
+    return @($runs)
+}
+
+# 读取耗时基准；只有统计文件不存在或没有任何有效记录时，才从历史日志回填一次。
+# 一旦有任意一条有效记录就不再解析日志——删除 run_stats.jsonl 即可重置基准。
+function Initialize-RunStats {
+    param(
+        [string]$Path,
+        [string]$LogDirectory,
+        [int]$WantedRuns = 5
+    )
+    try {
+        $existing = @(Read-RunStats -Path $Path)
+        if ($existing.Count -gt 0) { return $existing }
+
+        if (-not $LogDirectory) { return @() }
+        $legacy = @(Import-LegacyRunStats -LogDirectory $LogDirectory -WantedRuns $WantedRuns)
+        if ($legacy.Count -eq 0) {
+            Write-Host '  运行统计: 没有可用的历史运行记录，本次无法评估耗时（完成后会自动建立基准）' -ForegroundColor Yellow
+            return @()
+        }
+
+        if ($DryRun) {
+            Write-Host "  运行统计: DryRun 不落盘，临时从历史日志回填 $($legacy.Count) 次运行" -ForegroundColor DarkGray
+            return $legacy
+        }
+
+        # Import 按时间倒序返回；统计文件按旧 → 新追加，便于人工查看
+        $written = 0
+        for ($i = $legacy.Count - 1; $i -ge 0; $i--) {
+            if (Add-RunStatsRecord -Path $Path -Record $legacy[$i] -Keep $script:RunStatsKeep) {
+                $written++
+            }
+        }
+        if ($written -gt 0) {
+            Write-Host "  运行统计: 已从历史日志回填 $written 次运行作为初始基准" -ForegroundColor DarkGray
+        }
+        else {
+            Write-Warn '历史日志已解析，但运行统计没能写入；本次仍使用临时基准，下次启动会重试'
+        }
+        return $legacy
+    }
+    catch {
+        Write-Warn "初始化运行统计失败（$($_.Exception.Message)），本次不做耗时预估"
+        return @()
+    }
+}
+
+# 用最近 N 次运行的同阶段样本算加权倍率，再按本次每个文件的时长估算。
+# 只要有有效样本就用，不按模型/编码器/CUDA/CPU 过滤，文案里也不显示配置。
+function Get-RunEta {
+    param(
+        [object[]]$Plans,
+        [object[]]$History,
+        [int]$HistoryRuns = 5
+    )
+
+    # 1. 只保留有有效文件样本的运行，按开始时间倒序取最近 N 次
+    $runs = @()
+    foreach ($r in @($History)) {
+        if (-not $r) { continue }
+        $files = @()
+        foreach ($f in @($r.Files)) {
+            if (-not $f) { continue }
+            if ([bool]$f.Failed) { continue }
+            $duration = [double]$f.DurationSec
+            if ($duration -le 0) { continue }
+            $mute = [double]$f.MuteSec
+            $burn = [double]$f.BurnSec
+            $remux = [double]$f.RemuxSec
+            if (($mute + $burn + $remux) -le 0) { continue }
+            $files += [pscustomobject]@{
+                DurationSec = $duration
+                MuteSec     = $mute
+                BurnSec     = $burn
+                RemuxSec    = $remux
+                ProbeSec    = [double]$f.ProbeSec
+            }
+        }
+        if ($files.Count -eq 0) { continue }
+        $started = [datetimeoffset]::MinValue
+        $parsed = [datetimeoffset]::TryParse(
+            [string]$r.StartedAt,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::None,
+            [ref]$started)
+        if (-not $parsed) { $started = [datetimeoffset]::MinValue }
+        $runs += [pscustomobject]@{
+            StartedAt = $started
+            Files     = $files
+        }
+    }
+    $take = [math]::Max(1, $HistoryRuns)
+    $runs = @($runs | Sort-Object StartedAt -Descending | Select-Object -First $take)
+
+    # 2. 汇总阶段样本：每阶段单独算 Σ耗时 / Σ视频秒
+    $samples = @()
+    foreach ($run in $runs) {
+        foreach ($f in @($run.Files)) { $samples += $f }
+    }
+    $muteDur = 0.0; $muteSec = 0.0
+    $burnDur = 0.0; $burnSec = 0.0
+    $remuxDur = 0.0; $remuxSec = 0.0
+    $probeValues = @()
+    foreach ($s in $samples) {
+        if ($s.MuteSec -gt 0) { $muteDur += $s.DurationSec; $muteSec += $s.MuteSec }
+        if ($s.BurnSec -gt 0) { $burnDur += $s.DurationSec; $burnSec += $s.BurnSec }
+        if ($s.RemuxSec -gt 0) { $remuxDur += $s.DurationSec; $remuxSec += $s.RemuxSec }
+        if ($s.ProbeSec -gt 0) { $probeValues += $s.ProbeSec }
+    }
+    $muteRate = if ($muteDur -gt 0) { $muteSec / $muteDur } else { $null }
+    $burnRate = if ($burnDur -gt 0) { $burnSec / $burnDur } else { $null }
+    $remuxRate = if ($remuxDur -gt 0) { $remuxSec / $remuxDur } else { $null }
+
+    # 固定开销取中位数，避免一次卡顿把每文件开销抬高
+    $probeFixed = 0.0
+    if ($probeValues.Count -gt 0) {
+        $sorted = @($probeValues | Sort-Object)
+        $mid = [int][math]::Floor($sorted.Count / 2)
+        if ($sorted.Count % 2 -eq 0) {
+            $probeFixed = ([double]$sorted[$mid - 1] + [double]$sorted[$mid]) / 2.0
+        }
+        else {
+            $probeFixed = [double]$sorted[$mid]
+        }
+    }
+
+    # 3. 每个本次文件的预计
+    $items = @()
+    $totalEta = 0.0
+    $totalDuration = 0.0
+    $hasPartial = $false
+    foreach ($p in @($Plans)) {
+        if (-not $p) { continue }
+        $eta = 0.0
+        $missing = @()
+        $status = 'ok'
+        if ($p.Exists) {
+            $status = 'skip'
+        }
+        elseif ($p.MissingMuted) {
+            $status = 'fail'
+        }
+        elseif ([double]$p.DurationSec -le 0) {
+            $status = 'unknown'
+        }
+        elseif ($samples.Count -eq 0) {
+            # 完全没有可用样本：不进入阶段累加，避免重复提示“缺各阶段样本”
+            $status = 'unknown'
+            $totalDuration += [double]$p.DurationSec
+        }
+        else {
+            $eta += $probeFixed
+            if ($p.NeedMute) {
+                if ($null -ne $muteRate) { $eta += [double]$p.DurationSec * $muteRate }
+                else { $missing += '消音' }
+            }
+            if ($p.Mode -eq 'burn') {
+                if ($null -ne $burnRate) { $eta += [double]$p.DurationSec * $burnRate }
+                else { $missing += '烧录' }
+            }
+            elseif ($p.Mode -eq 'remux') {
+                if ($null -ne $remuxRate) { $eta += [double]$p.DurationSec * $remuxRate }
+                else { $missing += '转封装' }
+            }
+            if ($missing.Count -gt 0) {
+                $status = 'partial'
+                $hasPartial = $true
+            }
+            $totalEta += $eta
+            $totalDuration += [double]$p.DurationSec
+        }
+        $items += [pscustomobject]@{
+            Plan       = $p
+            EtaSeconds = $eta
+            Status     = $status
+            Missing    = @($missing)
+        }
+    }
+
+    return [pscustomobject]@{
+        RunsUsed             = $runs.Count
+        HistoryRuns          = $take
+        FilesUsed            = $samples.Count
+        MuteRate             = $muteRate
+        BurnRate             = $burnRate
+        RemuxRate            = $remuxRate
+        ProbeFixed           = $probeFixed
+        Items                = @($items)
+        TotalEtaSeconds      = $totalEta
+        TotalDurationSec     = $totalDuration
+        HasPartial           = $hasPartial
+        HasSamples           = ($samples.Count -gt 0)
+    }
+}
+
+# 基准说明：只用运行次数和文件样本数，不显示模型/编码器等配置。
+# 没有可用样本时说清“数据不足，无法评估”，不猜默认速度。
+function Get-EtaBasisText {
+    param([object]$Eta)
+    if (-not $Eta -or -not $Eta.HasSamples) {
+        return '数据不足：本地没有可用的运行记录，本次无法评估耗时（完成后会自动开始积累基准）'
+    }
+
+    $parts = @()
+    $parts += "最近 $($Eta.RunsUsed) 次运行"
+    $parts += "$($Eta.FilesUsed) 个文件样本"
+    $text = $parts -join '，'
+
+    if ($Eta.RunsUsed -lt $Eta.HistoryRuns -or $Eta.FilesUsed -lt 3) {
+        $text += "（样本有限：$($Eta.RunsUsed) 次运行 / $($Eta.FilesUsed) 个文件，按现有样本估算）"
+    }
+    if ($Eta.HasPartial) {
+        $text += '；部分阶段缺少样本，预计值不完整'
+    }
+    return $text
+}
+
+# 启动清单：每个文件一行，末尾合计和基准说明。正式运行只打印，不在这里暂停。
+function Write-EstimateList {
+    param(
+        [object[]]$Plans,
+        [object]$Eta,
+        [string]$BasisText
+    )
+    Write-Host ''
+    Write-Host '===== 本次待处理 =====' -ForegroundColor Magenta
+
+    $items = if ($Eta) { @($Eta.Items) } else { @() }
+    $hasBasis = ($Eta -and $Eta.HasSamples)
+    $idx = 0
+    foreach ($p in @($Plans)) {
+        $idx++
+        $item = if ($idx -le $items.Count) { $items[$idx - 1] } else { $null }
+
+        $platformText = switch ($p.Plat.Key) {
+            'douyin' { '抖音' }
+            'bilibili' { 'B站' }
+            'xiaohongshu' { '小红书' }
+            default { '未知来源' }
+        }
+        $stageText = if ($p.Mode -eq 'burn') {
+            if ($p.NeedMute) { '消音+烧录' } else { '仅烧录' }
+        }
+        else {
+            if ($p.NeedMute) { '消音+转封装' } else { '仅转封装' }
+        }
+
+        $durationText = if ($p.DurationSec -gt 0) { Format-DurationText $p.DurationSec } else { '--:--:--' }
+        $sizeText = if ($p.SizeBytes -gt 0) { Format-SizeText $p.SizeBytes } else { '--' }
+
+        $etaText = '—'
+        $note = ''
+        $color = 'Gray'
+        if ($p.Exists) {
+            $note = '已存在成品，跳过'
+            $color = 'DarkGray'
+        }
+        elseif ($p.MissingMuted) {
+            $note = '缺少消音版，将失败'
+            $color = 'Red'
+        }
+        elseif ($p.DurationSec -le 0) {
+            $note = '时长未知，无法预估'
+            $color = 'Yellow'
+        }
+        elseif (-not $hasBasis) {
+            $note = '数据不足，无法评估'
+            $color = 'Yellow'
+        }
+        elseif ($item -and $item.Status -ne 'skip' -and $item.Status -ne 'fail' -and $item.Status -ne 'unknown') {
+            $etaText = Format-EtaText $item.EtaSeconds
+            if ($item.Status -eq 'partial') {
+                $note = "缺 $($item.Missing -join '/') 样本"
+                $color = 'Yellow'
+            }
+        }
+
+        $line = "  {0}. {1}  [{2}, {3}, {4}/{5}]  预计 {6}" -f $idx, $p.Flv.Name, $durationText, $sizeText, $platformText, $stageText, $etaText
+        if ($note) { $line += "（$note）" }
+        Write-Host $line -ForegroundColor $color
+    }
+
+    $pendingCount = @($Plans | Where-Object { -not $_.Exists -and -not $_.MissingMuted }).Count
+    if ($pendingCount -eq 0) {
+        Write-Host ''
+        Write-Host '  合计: 本次没有需要处理的文件（全部跳过/失败）' -ForegroundColor Cyan
+    }
+    else {
+        if ($Eta) {
+            $totalDuration = [double]$Eta.TotalDurationSec
+        }
+        else {
+            $totalDuration = @($Plans | ForEach-Object {
+                    if ($_.DurationSec -gt 0 -and -not $_.Exists -and -not $_.MissingMuted) { [double]$_.DurationSec }
+                }) | Measure-Object -Sum
+            $totalDuration = $totalDuration.Sum
+        }
+        $totalEtaText = if ($hasBasis) { Format-EtaText $Eta.TotalEtaSeconds } elseif ($Eta) { '无法评估（数据不足）' } else { '—' }
+        Write-Host ''
+        Write-Host ("  合计: {0} 个文件，视频 {1}，预计处理 {2}" -f @($Plans).Count, (Format-DurationText $totalDuration), $totalEtaText) -ForegroundColor Cyan
+        if ($Eta -and $Eta.HasPartial) {
+            Write-Host '  注意: 部分阶段缺少样本，预计值不完整' -ForegroundColor Yellow
+        }
+    }
+    if ($BasisText) {
+        Write-Host "  基准: $BasisText" -ForegroundColor DarkGray
+    }
+}
+
+# 运行结束对比预估/实际（按非失败文件的 TotalSec 求和），帮助判断基准是否还准。
+# Write-Host 包装会把这行同时写进运行日志。
+function Write-EtaComparison {
+    param(
+        [object]$Eta,
+        [object[]]$FileStats
+    )
+    if (-not $Eta -or -not $Eta.HasSamples) { return }
+    $actual = @($FileStats | Where-Object { -not $_.Failed } | Measure-Object -Property TotalSec -Sum).Sum
+    if ($null -eq $actual) { $actual = 0.0 }
+    $estimate = [double]$Eta.TotalEtaSeconds
+    if ($estimate -le 0 -or $actual -le 0) { return }
+    $diff = ($actual - $estimate) / $estimate * 100
+    $sign = if ($diff -ge 0) { '+' } else { '' }
+    Write-Host ("  耗时对比: 预估 {0} / 实际 {1}（误差 {2}{3}%）" -f (Format-EtaText $estimate), (Format-EtaText $actual), $sign, [math]::Round($diff, 1)) -ForegroundColor DarkGray
+}
+
 # 未捕获的终止错误也写进日志（记录后保持原有终止行为）
 trap {
     Write-Log "脚本异常终止: $($_.Exception.Message)"
@@ -401,6 +1095,9 @@ $ratioTolerance = 0.05
 # ---------- 常量 ----------
 $MUTED_TAG = '_消音版'
 $DANMAKU_TAG = '_弹幕版'
+# 待处理的录播容器。录制软件绝大多数时候出 FLV，极个别情况会出 TS；
+# 两者走同一条流水线。以后要加别的格式，只在这里追加扩展名即可。
+$VideoExtensions = @('.flv', '.ts')
 # 平台前缀表
 $PlatformPrefix = @{
     douyin       = '抖音-'
@@ -439,7 +1136,7 @@ function Write-Produced([string]$Path) {
 }
 function Write-Skip([string]$Text) { Write-Host "   [跳过] $Text" -ForegroundColor DarkGray }
 function Write-Warn([string]$Text) { Write-Host "   [警告] $Text" -ForegroundColor Yellow }
-function Write-Err([string]$Text) { Write-Host "   [失败] $Text" -ForegroundColor Red }
+function Write-Err([string]$Text) { $script:FileFailed = $true; Write-Host "   [失败] $Text" -ForegroundColor Red }
 
 # ---------- 完成通知 ----------
 # 全部处理结束后走 Windows 10/11 通知渠道发一条消息。
@@ -886,6 +1583,66 @@ function Get-VideoDuration {
     return 0.0
 }
 
+# 逐包扫描 DTS，返回整条流的时间轴跨度（最大 DTS - 最小 DTS）。
+# 容器没写时长时用它兜底：FLV 的 duration 来自 onMetaData，录制端没写时
+# ffprobe 直接报 0.000000（不是 N/A），而 DTS 跨度就是播放器看到的时长。
+# 比「视频包数 / 帧率」可靠：VFR 或时间戳空洞丢帧时后者会低估
+# （实测某 47 分钟素材只算出 41.9 分钟）。
+# 需要读完整个文件（实测 552 MB 约 0.7s），只在兜底时调用。
+function Get-MediaSpanSeconds {
+    param([string]$FFprobe, [string]$Path)
+    if (-not $FFprobe) { return 0.0 }
+    $out = & $FFprobe -v error -show_entries packet=dts_time -of csv=p=0 -- $Path 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $out) { return 0.0 }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $min = [double]::MaxValue
+    $max = [double]::MinValue
+    foreach ($line in $out) {
+        $text = $line.ToString().Trim()
+        if (-not $text -or $text -eq 'N/A') { continue }
+        $d = 0.0
+        if (-not [double]::TryParse($text, [System.Globalization.NumberStyles]::Float, $inv, [ref]$d)) { continue }
+        if ($d -lt $min) { $min = $d }
+        if ($d -gt $max) { $max = $d }
+    }
+    if ($max -le $min) { return 0.0 }
+    return [math]::Round($max - $min, 1)
+}
+
+# 视频包数 / 帧率。只在容器时长和 DTS 跨度都拿不到时才用它。
+function Get-PacketBasedDuration {
+    param([string]$FFprobe, [string]$Path, [double]$Fps)
+    if (-not $FFprobe -or $Fps -le 0) { return 0.0 }
+    $out = & $FFprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 -- $Path 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $out) { return 0.0 }
+    $packets = 0
+    if (-not [int]::TryParse((($out | Select-Object -First 1).ToString().Trim()), [ref]$packets)) { return 0.0 }
+    if ($packets -le 0) { return 0.0 }
+    return [math]::Round($packets / $Fps, 1)
+}
+
+# 预估专用时长：FLV 的时间戳空洞/倒流会把 format.duration 撑得很大
+# （实测某 36 分钟素材报 2:37:03），而没写 onMetaData duration 的 FLV 会报 0。
+# 正常文件仍用容器时长；撑大时用包数推算；报 0 时先按 DTS 跨度、再按包数推算。
+# 只在启动预估时调用；主流程的画布采样仍用 Get-VideoDuration。
+function Get-EffectiveVideoDuration {
+    param([string]$FFprobe, [string]$Path)
+    $duration = Get-VideoDuration -FFprobe $FFprobe -Path $Path
+    $fps = Get-VideoFrameRate -FFprobe $FFprobe -Path $Path
+
+    if ($duration -le 0) {
+        $span = Get-MediaSpanSeconds -FFprobe $FFprobe -Path $Path
+        if ($span -gt 0) { return $span }
+        return Get-PacketBasedDuration -FFprobe $FFprobe -Path $Path -Fps $fps
+    }
+
+    if ($fps -le 0) { return $duration }
+    $packetDuration = Get-PacketBasedDuration -FFprobe $FFprobe -Path $Path -Fps $fps
+    if ($packetDuration -le 0) { return $duration }
+    if ($duration -gt $packetDuration * 2.0) { return $packetDuration }
+    return $duration
+}
+
 # 读视频的「标称帧率」，用于把时间戳塌陷/带空洞的源补成恒定帧率（CFR）。
 # 优先 avg_frame_rate，其次 r_frame_rate；两者都可能是伪值（例如 1000/1），
 # 超出 1..120 就不采信，返回 0 让调用方退回「只重编音频、不强制 CFR」。
@@ -912,6 +1669,42 @@ function Get-VideoFrameRate {
         if ($fps -ge 1.0 -and $fps -le 120.0) { return $fps }
     }
     return 0.0
+}
+
+# 有效帧率：优先用 stream 里的标称帧率；有些 TS 录制端会写成 r_frame_rate=2000/1、
+# avg_frame_rate=0/0（实测），这时退回「视频包数 / 容器时长」。
+# 只在常规字段不可用时才扫描全文件，正常 FLV 不会多花时间。
+function Get-EffectiveFrameRate {
+    param([string]$FFprobe, [string]$Path)
+    $fps = Get-VideoFrameRate -FFprobe $FFprobe -Path $Path
+    if ($fps -ge 1.0) { return $fps }
+    if (-not $FFprobe) { return 0.0 }
+
+    $duration = Get-VideoDuration -FFprobe $FFprobe -Path $Path
+    if ($duration -le 0) { return 0.0 }
+    $out = & $FFprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 -- $Path 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $out) { return 0.0 }
+    $packets = 0
+    $text = (($out | Select-Object -First 1).ToString().Trim() -split ',')[0].Trim()
+    if (-not [int]::TryParse($text, [ref]$packets)) { return 0.0 }
+    if ($packets -le 0) { return 0.0 }
+
+    $avg = $packets / $duration
+    if ($avg -ge 1.0 -and $avg -le 120.0) { return [math]::Round($avg, 3) }
+    return 0.0
+}
+
+# 读首路视频的编码名（h264 / hevc / mpeg2video ...）。
+# 仅消音转封装默认 -c:v copy，但 MP4 只适合 h264/hevc；其他编码直接拷会因为
+# 容器不支持而失败，需要退回重编码。探不到时返回空串，调用方保持原来的 copy 行为。
+function Get-VideoCodec {
+    param([string]$FFprobe, [string]$Path)
+    if (-not $FFprobe) { return '' }
+    $out = & $FFprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 -- $Path 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $out) { return '' }
+    # 某些 ffprobe 版本会在 csv 输出末尾多一个逗号，先按逗号取第一段
+    $name = (($out | Select-Object -First 1).ToString().Trim() -split ',')[0].Trim()
+    return $name.ToLowerInvariant()
 }
 
 # 成品时间戳自检：逐包比较相邻 DTS，检查「重复/倒退」与「过大间隔」。
@@ -986,6 +1779,9 @@ function Get-OutputCanvas {
     $declared = Get-VideoSize -FFprobe $FFprobe -Path $Path
     $declaredSize = if ($declared) { "$($declared.Width)x$($declared.Height)" } else { $null }
     $dur = Get-VideoDuration -FFprobe $FFprobe -Path $Path
+    # 容器没写时长时（FLV 缺 onMetaData duration）采样点会全被跳过，
+    # 只剩容器声明尺寸可选；用 DTS 跨度兜底，保证中途换分辨率的检查不被跳过。
+    if ($dur -le 0) { $dur = Get-MediaSpanSeconds -FFprobe $FFprobe -Path $Path }
     $samples = Get-VideoLayoutSamples -FFmpeg $FFmpeg -Path $Path -Duration $dur
 
     $all = @()
@@ -1121,13 +1917,15 @@ if ($Container -eq 'mp4' -or $Container -eq 'mov') {
 # ---------- 收集待处理文件 ----------
 # 只排除本流程/beep_filter 产出的文件，避免二次运行时把成品又当成新素材。
 # 按「主文件名后缀」判断而不是完整文件名的后缀，这样与封装格式无关：
-#   X_消音版.flv / X_消音版_弹幕版.mp4 / X_消音版_弹幕版.flv / X_消音版_手动修改.flv
+#   X_消音版.flv / X_消音版.ts / X_消音版_弹幕版.mp4 / X_消音版_手动修改.flv
 # 都能被排除；而名字中间恰好含这些字样的原始素材（如 xxx_消音版原片.flv）仍会正常处理。
 $producedStemSuffixes = @($MUTED_TAG, $DANMAKU_TAG, '_手动修改')
+# 变量名沿用 $flvs / $flv（历史原因），实际包含 $VideoExtensions 里的所有容器：
+# 目前是 .flv 与 .ts，两者走完全相同的流程。
 $flvs = @(
-    Get-ChildItem -LiteralPath $Directory -Filter '*.flv' |
+    Get-ChildItem -LiteralPath $Directory -File |
         Where-Object {
-            if ($_.PSIsContainer) {
+            if ($VideoExtensions -notcontains $_.Extension.ToLowerInvariant()) {
                 $false
             }
             else {
@@ -1146,15 +1944,135 @@ $flvs = @(
 )
 
 if ($flvs.Count -eq 0) {
-    Write-Warn "目录中没有可处理的 .flv 文件: $Directory"
-    Send-CompletionNotification -Title '一键拆弹：没有待处理文件' -Message "目录中没有可处理的 .flv：$Directory"
+    Write-Warn "目录中没有可处理的视频文件（$($VideoExtensions -join ' / ')）: $Directory"
+    Send-CompletionNotification -Title '一键拆弹：没有待处理文件' -Message "目录中没有可处理的视频文件（$($VideoExtensions -join ' / ')）：$Directory"
     Close-Log -ExitCode 0
     exit 0
 }
-Write-Host "  待处理   : $($flvs.Count) 个 flv" -ForegroundColor Gray
+Write-Host "  待处理   : $($flvs.Count) 个视频" -ForegroundColor Gray
+
+# ---------- 本次处理计划 ----------
+# 先判断每个文件会走哪条路径，供启动清单/耗时预估和主循环共用。
+# 平台判断对无弹幕文件要读 ffprobe metadata，缓存后主循环不再重复调用。
+$plans = New-Object System.Collections.ArrayList
+$planByPath = @{}
+foreach ($flv in $flvs) {
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($flv.Name)
+    # 中间产物沿用源容器的扩展名：.flv → _消音版.flv，.ts → _消音版.ts。
+    # beep_filter.py 默认也按输入后缀命名，ps1 仍会显式 -o 指定，避免依赖默认值。
+    $srcExt = $flv.Extension
+    if (-not $srcExt) { $srcExt = '.flv' }
+    $mutedPlain = Join-Path $Directory "${stem}${MUTED_TAG}${srcExt}"
+    $assPath = Join-Path $Directory "${stem}.ass"
+    $xmlPath = Join-Path $Directory "${stem}.xml"
+    try {
+        $plat = Resolve-Platform -AssPath $assPath -XmlPath $xmlPath -VideoPath $flv.FullName -FFprobe $FFprobePath -Override $Platform
+    }
+    catch {
+        $plat = @{ Key = 'none'; Reason = "平台判断失败：$($_.Exception.Message)" }
+    }
+    $prefix = $PlatformPrefix[$plat.Key]
+    if ($null -eq $prefix) { $prefix = '' }
+
+    # 中间产物（仅消音，扩展名跟随源容器；带平台前缀，-KeepMuted 时才保留）
+    $mutedFinal = Join-Path $Directory "${prefix}${stem}${MUTED_TAG}${srcExt}"
+    # 无弹幕时的最终成品（仅消音 MP4；-Container 可改 mov/mkv）
+    $mutedMp4 = Join-Path $Directory "${prefix}${stem}${MUTED_TAG}.${Container}"
+    $danmakuPath = Join-Path $Directory "${prefix}${stem}${MUTED_TAG}${DANMAKU_TAG}.${Container}"
+
+    $hasAss = Test-Path -LiteralPath $assPath
+    $hasXml = Test-Path -LiteralPath $xmlPath
+    # ass（抖音）可直接烧；xml（B站）要先转成 ASS，两者都能出弹幕成品。
+    # 万一同名 ass 与 xml 同时存在，以 ass 为准（不再重复烧一遍 xml）。
+    $willBurn = ($hasAss -or $hasXml) -and -not $SkipDanmaku
+    $finalPath = if ($willBurn) { $danmakuPath } else { $mutedMp4 }
+    $mode = if ($willBurn) { 'burn' } else { 'remux' }
+
+    $existingMuted = Find-MutedFile -Paths @($mutedPlain, $mutedFinal)
+    $missingMuted = $SkipMute -and -not $existingMuted
+    $needMute = -not $SkipMute -and -not ($existingMuted -and -not $Force)
+    $exists = (Test-Path -LiteralPath $finalPath) -and -not $Force
+    $skipReason = ''
+    if ($exists) { $skipReason = '已存在成品' }
+    elseif ($missingMuted) { $skipReason = '缺少消音版' }
+
+    $filePlan = [pscustomobject]@{
+        Flv           = $flv
+        Stem          = $stem
+        SourceExt     = $srcExt
+        Plat          = $plat
+        Prefix        = $prefix
+        MutedPlain    = $mutedPlain
+        MutedFinal    = $mutedFinal
+        MutedMp4      = $mutedMp4
+        DanmakuPath   = $danmakuPath
+        AssPath       = $assPath
+        XmlPath       = $xmlPath
+        HasAss        = $hasAss
+        HasXml        = $hasXml
+        WillBurn      = $willBurn
+        FinalPath     = $finalPath
+        ExistingMuted = $existingMuted
+        NeedMute      = $needMute
+        MissingMuted  = $missingMuted
+        Mode          = $mode
+        Exists        = $exists
+        SkipReason    = $skipReason
+        DurationSec   = 0.0
+        SizeBytes     = [long]0
+    }
+    $planByPath[$flv.FullName] = $filePlan
+    [void]$plans.Add($filePlan)
+}
+
+# 只给真正要处理的文件读时长/大小；已存在成品或缺少消音版的文件在清单里只标原因，
+# 不再花时间跑 ffprobe 读时长。
+foreach ($filePlan in $plans) {
+    if ($filePlan.Exists -or $filePlan.MissingMuted) { continue }
+    $filePlan.SizeBytes = [long]$filePlan.Flv.Length
+    if ($FFprobePath) {
+        try {
+            $filePlan.DurationSec = Get-EffectiveVideoDuration -FFprobe $FFprobePath -Path $filePlan.Flv.FullName
+        }
+        catch {
+            $filePlan.DurationSec = 0.0
+        }
+    }
+}
+
+# ---------- 耗时预估 ----------
+# 统计文件不存在时从历史日志回填一次；之后只读 run_stats.jsonl。
+# 预估只用于提示，任何失败都不影响主流程。
+$script:StatsPath = Get-RunStatsPath -LogDirectory $LogDir
+if (-not $NoEstimate) {
+    $history = @(Initialize-RunStats -Path $script:StatsPath -LogDirectory $LogDir -WantedRuns ([math]::Max(5, $HistoryRuns)))
+    $script:EtaResult = Get-RunEta -Plans @($plans) -History $history -HistoryRuns $HistoryRuns
+    $basisText = Get-EtaBasisText -Eta $script:EtaResult
+    Write-EstimateList -Plans @($plans) -Eta $script:EtaResult -BasisText $basisText
+}
+else {
+    $script:EtaResult = $null
+    Write-EstimateList -Plans @($plans) -Eta $null -BasisText '已通过 -NoEstimate 关闭预估；本次不读取/写入运行统计'
+}
+
+# DryRun 预览在清单后等一次回车；非交互式（计划任务/重定向）自动继续，-Yes 跳过
+if ($DryRun -and -not $Yes -and -not $NoEstimate) {
+    $interactive = $true
+    try { $interactive = -not [Console]::IsInputRedirected } catch { $interactive = $false }
+    if ($interactive) {
+        Write-Host ''
+        Write-Host '  按 Enter 继续预览，Ctrl+C 取消...' -ForegroundColor Yellow
+        $null = Read-Host
+    }
+    else {
+        Write-Host '  检测到非交互式输入，DryRun 不暂停' -ForegroundColor DarkGray
+    }
+}
 
 # ---------- 主流程 ----------
 $results = New-Object System.Collections.ArrayList
+# 每文件计时记录，运行结束时汇总成一条 run_stats.jsonl 记录
+$fileStats = New-Object System.Collections.ArrayList
 # 异常清单：跑完全部视频后在命令行最底部汇总提示（兜底提醒）
 $anomalies = New-Object System.Collections.ArrayList
 $failed = 0
@@ -1170,36 +2088,55 @@ $convMissingWarned = $false
 $censorMissingWarned = $false
 # 画布适配脚本缺失是否已提示过
 $fitMissingWarned = $false
+# 同名但不同容器的源文件（X.flv / X.ts）会落到同一个成品名：成品名里不含源扩展名。
+# 检测到冲突时只处理第一个，后来的显式跳过并记入异常汇总，避免汇总里出现假的
+# 「已存在(跳过)」让人以为两个文件都处理过。
+$seenSourceStems = @{}
 
 foreach ($flv in $flvs) {
-    $stem = [System.IO.Path]::GetFileNameWithoutExtension($flv.Name)
+    # 计划在启动时已经算好（含平台判断），这里直接复用，避免重复 ffprobe metadata
+    $filePlan = $planByPath[$flv.FullName]
+    $fileStartedAt = Get-Date
+    $muteStartedAt = $null
+    $finishStartedAt = $null
+    $muteSeconds = 0.0
+    $burnSeconds = 0.0
+    $remuxSeconds = 0.0
+    $script:FileFailed = $false
+
+    if ($seenSourceStems.ContainsKey($filePlan.Stem)) {
+        $firstSource = $seenSourceStems[$filePlan.Stem]
+        Write-Warn "同名源文件冲突：$($flv.Name) 与 $firstSource 会生成同一个成品名，本文件跳过"
+        [void]$results.Add([pscustomobject]@{ File = $flv.Name; Status = '同名冲突(跳过)'; Output = $filePlan.FinalPath; Extras = @() })
+        [void]$anomalies.Add([pscustomobject]@{
+                Kind   = '同名源文件冲突'
+                File   = $flv.Name
+                Detail = "与 $firstSource 主文件名相同，成品名相同；已跳过本文件，请只保留一个容器"
+            })
+        continue
+    }
+    $seenSourceStems[$filePlan.Stem] = $flv.Name
+
+    try {
+    $stem = $filePlan.Stem
     # 注意必须用 ${stem} 花括号：$stem_消音版 会被解析成变量名 stem_消音版
 
-    # beep_filter.py 固定输出这个名字（无前缀），作为中间产物
-    $mutedPlain = Join-Path $Directory "${stem}${MUTED_TAG}.flv"
-    # 带上平台前缀的消音版成品名
-    $assPath = Join-Path $Directory "${stem}.ass"
-    $xmlPath = Join-Path $Directory "${stem}.xml"
-
-    $plat = Resolve-Platform -AssPath $assPath -XmlPath $xmlPath -VideoPath $flv.FullName -FFprobe $FFprobePath -Override $Platform
-    $prefix = $PlatformPrefix[$plat.Key]
-
-    # 中间产物（仅消音 flv，带平台前缀；-KeepMuted 时才保留）
-    $mutedFinal = Join-Path $Directory "${prefix}${stem}${MUTED_TAG}.flv"
-    # 无弹幕时的最终成品（仅消音 MP4；-Container 可改 mov/mkv）
-    $mutedMp4 = Join-Path $Directory "${prefix}${stem}${MUTED_TAG}.${Container}"
-    $danmakuPath = Join-Path $Directory "${prefix}${stem}${MUTED_TAG}${DANMAKU_TAG}.${Container}"
-
-    $hasAss = Test-Path -LiteralPath $assPath
-    $hasXml = Test-Path -LiteralPath $xmlPath
-    # ass（抖音）可直接烧；xml（B站）要先转成 ASS，两者都能出弹幕成品。
-    # 万一同名 ass 与 xml 同时存在，以 ass 为准（不再重复烧一遍 xml）。
-    $willBurn = ($hasAss -or $hasXml) -and -not $SkipDanmaku
+    $mutedPlain = $filePlan.MutedPlain
+    $assPath = $filePlan.AssPath
+    $xmlPath = $filePlan.XmlPath
+    $plat = $filePlan.Plat
+    $prefix = $filePlan.Prefix
+    $mutedFinal = $filePlan.MutedFinal
+    $mutedMp4 = $filePlan.MutedMp4
+    $danmakuPath = $filePlan.DanmakuPath
+    $hasAss = $filePlan.HasAss
+    $hasXml = $filePlan.HasXml
+    $willBurn = $filePlan.WillBurn
 
     Write-Step "[$($flv.Name)]"
     Write-Host "   来源判断 : $($plat.Key) → 前缀 '$prefix'（$($plat.Reason)）" -ForegroundColor DarkGray
 
-    $finalPath = if ($willBurn) { $danmakuPath } else { $mutedMp4 }
+    $finalPath = $filePlan.FinalPath
 
     # ---- 画布探测 + 异常检查 ----
     # 特意放在「成品已存在就跳过」之前：已经出过片的素材同样要参与异常检查，
@@ -1208,12 +2145,15 @@ foreach ($flv in $flvs) {
     # 多数是为了兜住「万一同一文件内换了比例」——那种情况直接上 ass 滤镜会让 ffmpeg
     # 崩溃（实测 0xC0000005）并留下损坏的 mp4。
     # scale+pad 归一化的代价：正常视频是恒等变换（实测 PSNR=inf、耗时无差异）。
-    # 直接量原始 flv：beep_filter 的消音步骤对视频流一律 -c:v copy，
-    # 消音版的分辨率/比例必然与原始文件一致，不必等中间产物生成。
+    # 直接量原始视频：beep_filter 的消音步骤对视频流一律 -c:v copy，
+    # 消音版的分辨率/比例/编码必然与原始文件一致，不必等中间产物生成。
     $probeTarget = $flv.FullName
     $canvas = Get-OutputCanvas -FFprobe $FFprobePath -FFmpeg $FFmpegPath -Path $probeTarget -Override $OutputSize
-    # 标称帧率：用于把时间戳塌陷/带空洞的源补成 CFR；探不到就只修音频
-    $srcFps = Get-VideoFrameRate -FFprobe $FFprobePath -Path $probeTarget
+    # 有效帧率：用于把时间戳塌陷/带空洞的源补成 CFR；常规字段不可用时
+    # 会退回「视频包数 / 容器时长」（TS 录制端常写伪帧率）；探不到就只修音频
+    $srcFps = Get-EffectiveFrameRate -FFprobe $FFprobePath -Path $probeTarget
+    # 视频编码：仅消音转封装走 -c:v copy 时，用它判断 MP4 是否装得下
+    $srcCodec = Get-VideoCodec -FFprobe $FFprobePath -Path $probeTarget
     $vfNorm = ''
     if ($canvas) {
         $cw = $canvas.Width
@@ -1292,7 +2232,8 @@ foreach ($flv in $flvs) {
     }
     else {
         Write-Host "   Step 1 消音中（Whisper $ModelSize）..." -ForegroundColor Gray
-        $pyArgs = @($beepScript, $flv.FullName, '--model-size', $ModelSize, '--no-log')
+        $muteStartedAt = Get-Date
+        $pyArgs = @($beepScript, $flv.FullName, '-o', $mutedPlain, '--model-size', $ModelSize, '--no-log')
         $code = Invoke-External -Exe $PythonPath -Arguments $pyArgs -WorkingDirectory $scriptDir
 
         $muteOk = ($code -eq 0)
@@ -1305,6 +2246,7 @@ foreach ($flv in $flvs) {
         }
         $mutedPath = $mutedPlain
         Write-Produced $mutedPath
+        $muteSeconds = [math]::Max(0.0, ((Get-Date) - $muteStartedAt).TotalSeconds)
     }
 
     # ---- Step 2: 弹幕硬编码 ----
@@ -1464,6 +2406,7 @@ foreach ($flv in $flvs) {
             }
 
             if ($prepOk) {
+                $finishStartedAt = Get-Date
                 Write-Host "   Step 2 烧录弹幕（$VideoEncoder → $Container）..." -ForegroundColor Gray
                 # 归一化滤镜必须在 ass 之前：先锁定帧尺寸，再让 libass 按固定画布绘制
                 $vfFull = if ($vfNorm) { "$vfNorm,ass=danmaku.ass" } else { 'ass=danmaku.ass' }
@@ -1472,8 +2415,13 @@ foreach ($flv in $flvs) {
                     '-i', $mutedPath,
                     '-vf', $vfFull
                 )
+                if ($filePlan.SourceExt -eq '.ts') {
+                    # TS 里可能带字幕/数据流，MP4 装不下；显式只映射首路视频与音频。
+                    # FLV 路径保持原有默认映射，不改已有行为。
+                    $ffArgs += @('-map', '0:v:0', '-map', '0:a:0?')
+                }
 
-                # 时间戳修复：源 FLV 可能有录制空洞/时间戳倒流（分段拼接、推流中断），
+                # 时间戳修复：源录播文件可能有录制空洞/时间戳倒流（分段拼接、推流中断），
                 # 直接重封装会把跳变带进成品，平台会以「时间戳跳变」拒收。
                 # 只有检测到异常时才按源标称帧率补成 CFR；正常文件保持原时间戳，
                 # 不做多余的补帧/丢帧（B站 30fps、抖音 18fps 都按各自源帧率）。
@@ -1546,6 +2494,7 @@ foreach ($flv in $flvs) {
             }
 
             Write-Produced $danmakuPath
+            $burnSeconds = [math]::Max(0.0, ((Get-Date) - $finishStartedAt).TotalSeconds)
             $finalPath = $danmakuPath
 
             # -KeepAss：把「最终烧录用的那份 ASS」留一份（与成品同名，便于检查/手工微调）。
@@ -1605,6 +2554,7 @@ foreach ($flv in $flvs) {
         }
 
         Write-Host "   Step 2 仅消音转封装（$Container）..." -ForegroundColor Gray
+        $finishStartedAt = Get-Date
 
         # 时间戳异常时按源标称帧率补 CFR；正常文件只做视频流拷贝转封装。
         $needCfr = $false
@@ -1628,9 +2578,20 @@ foreach ($flv in $flvs) {
             if (-not $DryRun) { New-Item -ItemType Directory -Path $workDir -Force | Out-Null }
 
             $ffArgs = @('-hide_banner', '-nostdin', '-stats', '-i', $mutedPath)
+            if ($filePlan.SourceExt -eq '.ts') {
+                # TS 里可能带字幕/数据流，MP4 装不下；显式只映射首路视频与音频。
+                # FLV 路径保持原有默认映射，不改已有行为。
+                $ffArgs += @('-map', '0:v:0', '-map', '0:a:0?')
+            }
 
-            # 只有画布真的换过或时间戳异常才重编码；正常文件保持 -c:v copy。
-            $reencode = $needCfr -or ($canvas -and $canvas.Mixed)
+            # 只有画布真的换过、时间戳异常，或源视频编码不适合 MP4 时才重编码；
+            # 正常文件保持 -c:v copy。
+            $copyableCodecs = @('h264', 'hevc')
+            $codecNeedsReencode = $srcCodec -and ($copyableCodecs -notcontains $srcCodec)
+            $reencode = $needCfr -or ($canvas -and $canvas.Mixed) -or $codecNeedsReencode
+            if ($codecNeedsReencode) {
+                Write-Warn "源视频编码 $srcCodec 不适合直接封装 MP4，转封装时将重编码为 H.264"
+            }
             if ($canvas -and $canvas.Mixed) {
                 $ffArgs += @('-vf', $vfNorm)
             }
@@ -1643,6 +2604,10 @@ foreach ($flv in $flvs) {
             }
             else {
                 $ffArgs += @('-c:v', 'copy')
+                if ($srcCodec -eq 'hevc') {
+                    # HEVC 默认 tag 是 hev1，部分平台/播放器只认 hvc1
+                    $ffArgs += @('-tag:v', 'hvc1')
+                }
             }
 
             # 音频始终重编：即使视频时间戳正常，源音频也可能有重复 DTS；
@@ -1683,6 +2648,7 @@ foreach ($flv in $flvs) {
             }
 
             Write-Produced $mutedMp4
+            $remuxSeconds = [math]::Max(0.0, ((Get-Date) - $finishStartedAt).TotalSeconds)
 
             # 中间产物的去留
             if ($KeepMuted) {
@@ -1711,13 +2677,44 @@ foreach ($flv in $flvs) {
     }
 
     [void]$results.Add([pscustomobject]@{ File = $flv.Name; Status = $status; Output = $finalPath; Extras = $extras })
-}
+        }
+        finally {
+            $fileTotal = [math]::Max(0.0, ((Get-Date) - $fileStartedAt).TotalSeconds)
+            # 失败/提前 continue 时也要有阶段耗时：用当前时刻兜底
+            if ($muteStartedAt -and $muteSeconds -le 0) {
+                $muteSeconds = [math]::Max(0.0, ((Get-Date) - $muteStartedAt).TotalSeconds)
+            }
+            if ($finishStartedAt -and ($burnSeconds + $remuxSeconds) -le 0) {
+                $finishElapsed = [math]::Max(0.0, ((Get-Date) - $finishStartedAt).TotalSeconds)
+                if ($filePlan.Mode -eq 'burn') { $burnSeconds = $finishElapsed }
+                else { $remuxSeconds = $finishElapsed }
+            }
+            $probeStart = if ($muteStartedAt) { $muteStartedAt } elseif ($finishStartedAt) { $finishStartedAt } else { $null }
+            $probeSeconds = if ($probeStart) { [math]::Max(0.0, ($probeStart - $fileStartedAt).TotalSeconds) } else { 0.0 }
+            $stageTotal = $muteSeconds + $burnSeconds + $remuxSeconds
+            # 成品已存在/跳过的文件不产生样本；失败和实际跑过阶段的文件都留记录
+            if ($stageTotal -gt 0 -or $script:FileFailed) {
+                [void]$fileStats.Add([pscustomobject]@{
+                        Name        = $filePlan.Flv.Name
+                        DurationSec = [double]$filePlan.DurationSec
+                        SizeBytes   = [long]$filePlan.SizeBytes
+                        MuteSec     = [math]::Round($muteSeconds, 1)
+                        BurnSec     = [math]::Round($burnSeconds, 1)
+                        RemuxSec    = [math]::Round($remuxSeconds, 1)
+                        ProbeSec    = [math]::Round($probeSeconds, 1)
+                        TotalSec    = [math]::Round($fileTotal, 1)
+                        Mode        = [string]$filePlan.Mode
+                        Failed      = [bool]$script:FileFailed
+                    })
+            }
+        }
+    }
 
 # ---------- 汇总 ----------
 Write-Host ''
 Write-Host '===== 处理汇总 =====' -ForegroundColor Magenta
 foreach ($r in $results) {
-    $color = switch -Wildcard ($r.Status) { '*失败*' { 'Red' } '缺少*' { 'Red' } '仅消音' { 'Yellow' } '已存在*' { 'DarkGray' } default { 'Green' } }
+    $color = switch -Wildcard ($r.Status) { '*失败*' { 'Red' } '缺少*' { 'Red' } '仅消音' { 'Yellow' } '*冲突*' { 'Yellow' } '已存在*' { 'DarkGray' } default { 'Green' } }
     Write-Host ("  [{0}] {1}" -f $r.Status, $r.File) -ForegroundColor $color
     Write-Host ("         → {0}" -f $r.Output) -ForegroundColor DarkGray
     foreach ($ex in @($r.Extras)) {
@@ -1770,6 +2767,20 @@ else {
 
 $elapsed = if ($script:RunStarted) { (Get-Date) - $script:RunStarted } else { [TimeSpan]::Zero }
 $elapsedText = "$([math]::Floor($elapsed.TotalMinutes)) 分 $($elapsed.Seconds) 秒"
+
+# 运行结束写一条 live 统计，供下次启动预估使用；失败只警告，不影响退出码
+if (-not $DryRun -and -not $NoEstimate -and $fileStats.Count -gt 0) {
+    $statsPath = if ($script:StatsPath) { $script:StatsPath } else { Get-RunStatsPath -LogDirectory $LogDir }
+    $estimateSeconds = if ($script:EtaResult) { [double]$script:EtaResult.TotalEtaSeconds } else { 0.0 }
+    [void](Save-RunStats -Path $statsPath -Files @($fileStats) -Model $ModelSize -Encoder $VideoEncoder `
+            -StartedAt $script:RunStarted -EndedAt (Get-Date) -EstimateSeconds $estimateSeconds)
+}
+
+# 预估/实际对比只在正式运行打印；DryRun 的耗时是模拟的，没有参考意义
+if (-not $DryRun) {
+    Write-EtaComparison -Eta $script:EtaResult -FileStats @($fileStats)
+}
+
 $notifyTitle = if ($failed -gt 0) { '一键拆弹：有失败项' } else { '一键拆弹：全部完成' }
 $notifyMessage = "处理 $($results.Count) 个，失败 $failed 个，耗时 $elapsedText"
 Send-CompletionNotification -Title $notifyTitle -Message $notifyMessage
