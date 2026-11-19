@@ -583,7 +583,7 @@ python danmaku_censor.py --list-keywords
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-Directory` | 脚本所在目录 | 待处理目录 |
-| `-ModelSize` | `large` | 传给 `beep_filter.py` 的 Whisper 模型（DryRun 预览时默认降到 `tiny`，方便快速调试） |
+| `-ModelSize` | `base` | 传给 `beep_filter.py` 的 Whisper 模型（DryRun 预览时默认降到 `tiny`，方便快速调试；默认 `base`，仍怕漏检可调成 `small` / `medium`） |
 | `-Container` | `mp4` | 成品封装：`mp4` / `mov` / `mkv` |
 | `-VideoEncoder` | `auto` | 优先 NVENC，不可用自动回退 libx264；也可强制 `nvenc` / `x264` |
 | `-Quality` | `23` | 编码质量，NVENC 用 `-cq`、x264 用 `-crf`，数值越小画质越好 |
@@ -748,8 +748,8 @@ x 比例缩小、文字本身却跟着字号比例放大，于是事件结束时
 ### Q: 识别不准确（漏检或误检）？
 
 **A:** 尝试以下方案：
+- `一键拆弹.ps1` 默认用 `base`；如果仍有漏检，可以加 `-ModelSize small` 或 `-ModelSize medium` 调大
 - 使用 `--review-model small` 启用双模型复审（最有效）
-- 使用更大的模型：`--model-size small` 或 `--model-size medium`
 - 先用 `--dry-run` 预览识别结果，确认关键词被正确识别
 - 审核打回后使用 `--manual` 手工补码精确时间点
 - 如果数字被读作其他表达方式，可以自行在脚本的 `TARGET_KEYWORDS` 列表中追加

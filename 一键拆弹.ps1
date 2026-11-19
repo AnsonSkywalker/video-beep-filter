@@ -61,7 +61,8 @@
         （实测 PSNR=inf 完全无损、耗时无差异）；比例不同的片段等比缩放加黑边。
         不做这一步的话，中途换比例会让 ffmpeg 直接崩溃、产出损坏文件。
       * DryRun 只预览、不跑 Whisper；未显式指定 -ModelSize 时预览默认用 tiny 以加快
-        调试，正式运行仍默认 large。
+        调试，正式运行默认 base（最近素材爆点较少，base 足够用；需要更严可 -ModelSize
+        small/medium）。
 
     B站 xml 弹幕转换说明（bili_danmaku_to_ass.py）：
       * <d p="时间,模式,字号,颜色,...">文本</d>；支持模式 1(右→左)、6(左→右)、
@@ -78,7 +79,7 @@
     待处理目录，默认脚本所在目录。
 
 .PARAMETER ModelSize
-    传给 beep_filter.py 的 Whisper 模型大小（tiny/base/small/medium/large），默认 large。
+    传给 beep_filter.py 的 Whisper 模型大小（tiny/base/small/medium/large），默认 base。
 
 .PARAMETER VideoEncoder
     需要重编码时的视频编码器（弹幕烧录、CFR 修复、画布归一化）：
@@ -237,7 +238,7 @@
 [CmdletBinding()]
 param(
     [string]$Directory,
-    [string]$ModelSize = 'large',
+    [string]$ModelSize = 'base',
     [ValidateSet('auto', 'nvenc', 'x264')]
     [string]$VideoEncoder = 'auto',
     [int]$Quality = 23,
@@ -1066,7 +1067,7 @@ trap {
 
 # DryRun 只预览、不跑 Whisper，但我们习惯先 DryRun 再照着跑一遍；
 # 未显式给 -ModelSize 时，DryRun 默认用最快的小模型，省得每次手打 tiny。
-# 正式运行（不加 -DryRun）仍默认 large，出片不受影响。
+# 正式运行（不加 -DryRun）默认 base，出片不受影响。
 $modelExplicit = $PSBoundParameters.ContainsKey('ModelSize')
 $modelAutoFast = $false
 if ($DryRun -and -not $modelExplicit) {
@@ -1851,7 +1852,7 @@ if (-not (Test-Path -LiteralPath $beepScript)) { throw "找不到 beep_filter.py
 Write-Host ''
 Write-Host '===== 一键拆弹 =====' -ForegroundColor Magenta
 Write-Host "  目录     : $Directory"
-Write-Host "  模型     : $ModelSize$(if ($modelAutoFast) { '（DryRun 预览默认 tiny；正式运行默认 large，可用 -ModelSize 指定）' })"
+Write-Host "  模型     : $ModelSize$(if ($modelAutoFast) { '（DryRun 预览默认 tiny；正式运行默认 base，可用 -ModelSize 指定）' })"
 Write-Host "  消音     : $(if ($SkipMute) { '跳过' } else { '执行' })"
 Write-Host "  弹幕烧录 : $(if ($SkipDanmaku) { '跳过' } else { '有弹幕则烧录，无则只消音' })"
 Write-Host "  仅消音文件: $(if ($KeepMuted) { '保留' } else { '不保留（默认）' })"
